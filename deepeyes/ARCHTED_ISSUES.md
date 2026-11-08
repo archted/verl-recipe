@@ -66,6 +66,11 @@
 | --- | --- | --- | --- | --- |
 | （暂无） | | | | |
 
+**准备中（2026-11-08）：**
+- I-8 issue 文稿：`deepeyes/drafts/I8_issue_verl-recipe.md`（已查重：上游无人提过；#4989 是 deepeyes.py system prompt，不撞车；上游 main 至今未修）
+- I-8 PR 分支：fork `archted/verl-recipe` 分支 `fix-deepeyes-run-script-model-path`（commit bd82d24，基于上游 main，`bash -n` 语法已验）。**提交 PR 前必须签 CLA**
+- DTS 单草稿 ×2：`deepeyes/drafts/DTS_drafts.md`（I-8 联动单 + I-3 文档纠错单），DTS 需 archted 手动提交
+
 ## 6. 教训库（如何让 PR 被收）
 
 1. **先签 CLA 再提 PR**——同事 3 个 PR（#8551/8553/8555）全部因 CLA 未签被关闭未合并，工作白做；
