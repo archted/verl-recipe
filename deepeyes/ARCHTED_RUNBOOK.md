@@ -1,0 +1,297 @@
+# ARCHTED Runbook · Qwen3.5 DeepEyes 多模态工具调用 GRPO（自包含手册）
+
+> 维护人：archted ｜ 创建：2026-11-08 ｜ 由 deepeyes-wiki-keeper skill 持续更新
+> **本手册自包含**：不需要再看同事的 RUNBOOK / TROUBLESHOOTING / 案例文档即可开展工作。
+> 问题记录见姊妹篇 `ARCHTED_TROUBLESHOOTING.md`（同目录）。
+
+---
+
+## 1. 这个工作是什么（一段话）
+
+用强化学习（GRPO）训练 Qwen3.5-9B 学会"边看图边思考"：模型推理时自主输出坐标调用**图像放大工具**，
+裁剪出的高清局部图回灌进思考过程，继续推理后给出最终答案。整个行为靠奖励信号
+（答对 0.8 + 格式 0.2 + 真用对工具 1.2）在昇腾 NPU 上端到端打磨，无需人工标注中间步骤。
+
+**术语速查**（详细解释见接手指南：`/home/h00516332/atd/verl_project/DeepEyes_接手指南_小白版.md`）：
+
+| 术语 | 一句话 |
+| --- | --- |
+| rollout | 模型实际"做题"生成轨迹的过程（多轮：思考→调工具→看裁剪图→再思考→答案） |
+| reward | 一条轨迹的最终得分：0.8×acc + 0.2×format + 1.2×tool |
+| judge | 独立部署的阅卷大模型（判定答案对不对），142 节点 18901 端口 |
+| GRPO | 每题采样 n=8 条轨迹、组内比较算优势的 RL 算法（无需 critic） |
+| vLLM-Ascend | 训练循环里负责生成（rollout）的推理引擎，也用于独立评测服务 |
+| FSDP2 | 训练侧的参数分片并行方案 |
+| AgentLoop/ToolAgentLoop | verl 驱动"生成→解析工具调用→执行→回灌"多轮循环的组件 |
+| qwen3_coder | Qwen3.5 属性式 XML 工具调用格式的解析器 |
+| checkpoint | 每 5 步保存一次；**只有最新 2 个含完整权重（各 106GB）**，其余只剩 data.pt |
+
+**角色关系**：DeepEyes（开源方法+数据）→ verl（训练框架，核心库）→ verl-recipe（配方仓，
+`deepeyes/` 目录）→ 同事做了 Qwen3.5+NPU 适配 → 我接手继续训练、评测、迭代。
+
+---
+
+## 2. 资产与 git 仓库地图（2026-11-08 盘点）
+
+### 2.1 机器
+
+| | 138（主力训练机） | 142（judge 机） |
+| --- | --- | --- |
+| 硬件 | 8×910B3（HBM 64GB/卡） | 8×910B3 |
+| HDK | 25.5.2（新，支持 ACL graph + IPC） | 25.2.0（旧，无 graph/IPC，别在上面训） |
+| 容器 | `deepeyes`（镜像 `quay.io/ascend/vllm-ascend:v0.27.1rc1`，sleep infinity 常驻） | 同名容器（judge 在里面跑） |
+| 当前占用 | **训练占满 8 卡**（~42GB/卡） | **judge 占满 8 卡**（TP=8，~57GB/卡） |
+| 免密访问 | 本机 | `ssh h00516332@71.10.29.142` ✅ 已通 |
+
+### 2.2 关键目录（138 宿主机 ↔ 容器 /workspace 同一份数据）
+
+| 宿主机路径 | 容器路径 | 内容 |
+| --- | --- | --- |
+| `/home/h00516332/deepeyes_run/verl` | `/workspace/verl` | **verl 核心（含 3 个补丁）+ recipe/deepeyes** |
+| `deepeyes_run/run_full_138.sh` | `/workspace/run_full_138.sh` | 正式训练启动脚本 |
+| `deepeyes_run/ckpts/full/` | `/workspace/ckpts/full/` | checkpoint（step_165/170 含完整权重，各 106GB） |
+| `deepeyes_run/logs/` | `/workspace/logs/` | 训练日志（当前 run：`full_outer_138_v3.log`） |
+| `deepeyes_run/data/deepeyes/` | `/workspace/data/deepeyes/` | 预过滤数据 train/val.filtered_8192.parquet（33137/256 条） |
+| `deepeyes_run/models/` | `/workspace/models/` | Qwen3.5-9B 原始模型 + **eval_qwen35_9b_step170（已导出的评测模型）** |
+| `deepeyes_run/eval_prep/` | `/workspace/eval_prep/` | **我的评测工程**（脚本/结果/报告） |
+| `deepeyes_run/conda/` | `/workspace/conda/` | conda env（`/workspace/conda/verl/bin/python`，Python 3.12） |
+
+### 2.3 git 仓库（都是我的 fork）
+
+| 仓库 | 分支 | 内容 | 用途 |
+| --- | --- | --- | --- |
+| `archted/verl-recipe` ← `/home/h00516332/atd/verl_project/verl-recipe/yuki` | `deepeyes-qwen35-npu` | 配方（deepeyes/ 目录 + 我的两份 Wiki） | 日常开发、文档 |
+| `archted/verl` ← `/home/h00516332/atd/verl_backup_work` | `deepeyes-qwen35-npu` | **verl 核心 3c6d9b43 + 3 补丁（commit ef8e1216）** | 资产备份、后续 verl 改动 |
+| upstream | `super-yuki/verl-recipe` | 同事原仓 | 同步他的更新 |
+
+**3 个 verl 核心补丁**（详见 TROUBLESHOOTING §C）：padding.py（#8413 jagged 修复）、
+tensordict_utils.py（unbind 兜底）、tool_parser.py（`...` 参数 JSON 化修复）。
+
+**凭据**：GitHub token 已配置于 `/home/h00516332/atd/.git-credentials`（明文，勿外传；公共机器，
+阶段结束后应撤销 token 并删文件）。142 SSH 免密（公钥已装入）。
+
+### 2.4 容器重建（138，容器意外丢失时）
+
+```bash
+docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
+  --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+  --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
+  --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /home/h00516332/deepeyes_run:/workspace -w /workspace \
+  quay.io/ascend/vllm-ascend:v0.27.1rc1 bash -lc "sleep infinity"
+```
+
+数据全在宿主机 bind mount 上，重建不丢；但容器内 `/workspace` 之外的改动（pip 装进镜像 fs 的包等）会丢。
+
+---
+
+## 3. 训练现状与日常监控
+
+### 3.1 当前 run（同事发起，我接手监控）
+
+- 脚本 `run_full_138.sh`：9B、`TRAIN_BATCH_SIZE=64`、`ROLLOUT_N=8`、`MAX_RESPONSE_LENGTH=16384`、
+  `GEN_TP=2`、`bypass_mode=True`、预过滤数据 + 绝对路径工具配置、`SAVE_FREQ=5`、
+  `max_actor_ckpt_to_keep=2`、日志 `logs/full_outer_138_v3.log`
+- 进度（2026-11-08）：**step 171/517（33%）**，单步 ~1755s（29 分钟），预计 **11-15 前后训完**
+- reward：`critic/score/mean ≈ 1.26–1.34`（持续上升中）
+- 已知噪声：judge 400 报错 ~8 次/步（prompt 超长被拒，记 0 分，见 TROUBLESHOOTING D-1）
+
+### 3.2 日常监控命令
+
+```bash
+# 训练进度与 reward（138 宿主机直接看）
+tail -f /home/h00516332/deepeyes_run/logs/full_outer_138_v3.log
+grep -oE "step:[0-9]+ .* critic/score/mean:[0-9.]+" logs/full_outer_138_v3.log | tail -5
+grep "Training Progress" logs/full_outer_138_v3.log | tail -1
+
+# 卡健康 / 训练进程存活
+npu-smi info
+
+# 142 judge 是否存活
+ssh h00516332@71.10.29.142 "ss -ltn | grep 18901 && curl -s http://127.0.0.1:18901/v1/models | head -c 200"
+
+# checkpoint 磁盘水位（每 5 步新增最多 106GB，只留 2 个）
+du -sh deepeyes_run/ckpts/full/global_step_*/actor 2>/dev/null
+df -h /home
+```
+
+**红线**：训练期间（8 卡被 rayWorkerDict/VLLMWorker_TP 占满）不得在 138 上起任何 NPU 进程、
+不得 kill 容器内进程、不得重启 judge（142 的 8 卡也被 judge 占满）。
+
+### 3.3 训练完成后的收尾
+
+1. 确认日志末尾 `Training Progress: 100%`，记录最终 reward；
+2. 记录被保留的最后 2 个权重 checkpoint（step 515/517 附近）；
+3. 释放 8 卡（容器内训练进程退出即可），开始评测（§4）。
+
+---
+
+## 4. 评测指南（训练完成后立即执行）
+
+### 4.1 已就绪的评测工程（`deepeyes_run/eval_prep/`）
+
+| 文件 | 作用 |
+| --- | --- |
+| `eval_agent.py` | 多轮 Agent 推理评测：调 vLLM 服务生成 → 解析 XML tool call → 相对坐标裁图 → 回灌 → 最终答案 → judge 判分。指标与训练 reward 完全对齐（accuracy / tool_call_rate / format_rate / mean_score） |
+| `serve_eval_model.sh` | 在空闲卡上起 vLLM 服务（自动设 HCCL 环境变量，端口默认 18900） |
+| `merger_step170.log` | step170 权重导出记录 |
+| `results_step170/`（待生成） | 评测结果（results.jsonl 明细 + summary.json 汇总） |
+
+已导出模型：`models/eval_qwen35_9b_step170`（step170 checkpoint 合并的 HF 格式，18GB）。
+用同样方法可导出最终 step（改 `--local_dir` 指向最终 checkpoint 的 actor 目录）。
+
+### 4.2 评测步骤（等 138 训练结束、8 卡空闲后）
+
+```bash
+# ① 在 138 的 deepeyes 容器内起服务（TP=2 占 2 卡，6 卡仍空闲可并行做别的）
+docker exec -d deepeyes bash -c "cd /workspace && \
+  ASCEND_RT_VISIBLE_DEVICES=0,1 bash /workspace/eval_prep/serve_eval_model.sh \
+  /workspace/models/eval_qwen35_9b_step170 eval-qwen35-9b-step170 2 2 18900 \
+  > /workspace/eval_prep/serve_step170.log 2>&1"
+# 参数顺序：<模型目录> <服务名> <卡数> [端口]
+
+# ② 等 1-2 分钟服务就绪后跑评测（256 条 val，约 20-40 分钟）
+docker exec deepeyes bash -c "export LLM_AS_A_JUDGE_BASE=http://71.10.29.142:18901/v1 && \
+  /workspace/conda/verl/bin/python /workspace/eval_prep/eval_agent.py \
+  --api-base http://127.0.0.1:18900/v1 --model eval-qwen35-9b-step170 \
+  --data /workspace/data/deepeyes/val.filtered_8192.parquet \
+  --out /workspace/eval_prep/results_step170 --concurrency 8"
+
+# ③ 基线对比：用原始模型再跑一次（导出无需训练，直接用现成模型目录）
+#    --model 参数改为基线服务名，--out 改为 results_baseline
+
+# ④ 产出对比报告（accuracy / tool_call_rate 两列表格，参照案例文档 §4.2 形式）
+```
+
+先跑 `--limit 16` 冒烟确认链路，再全量 256 条。**142 的 judge 不能动**（TP=8 占满 8 卡，
+且训练期间它在被打分调用）；评测一律用 138 的卡。
+
+### 4.3 导出任意 checkpoint 为 HF 模型（纯 CPU，随时可做）
+
+```bash
+docker exec deepeyes bash -c "cd /workspace/verl && /workspace/conda/verl/bin/python \
+  -m verl.model_merger merge --backend fsdp \
+  --local_dir /workspace/ckpts/full/global_step_<N>/actor \
+  --target_dir /workspace/models/eval_qwen35_9b_step<N>"
+# 注意：只有"最新 2 个" step 目录含完整权重；退出时的 glibc abort 是已知无害噪声
+```
+
+---
+
+## 5. 从零重建（换机器 / 容器丢失时）
+
+> 优先级：先试容器重建（§2.4，数据不丢）；全新机器才走本节。
+
+### 5.1 环境安装（镜像方案，138 实测有效）
+
+镜像 `quay.io/ascend/vllm-ascend:v0.27.1rc1` 内含 CANN 9.1.0 / vLLM 0.27.1 / torch 2.9 /
+transformers 5.14.1。需在 conda env（`/workspace/conda/verl`，Python 3.12）内调整：
+
+```bash
+pip install transformers==5.12.1   # 5.14.1 与 verl(<5.13) 不兼容（TROUBLESHOOTING #10）
+pip install qwen-vl-utils==0.0.14 --no-deps   # 数据过滤需要（#6）
+```
+
+verl 核心 + 配方安装（补丁版已推到我的 fork）：
+
+```bash
+git clone -b deepeyes-qwen35-npu https://github.com/archted/verl.git /workspace/verl
+cd /workspace/verl && git submodule update --init  # 或单独放 recipe
+pip install -e . --no-deps
+```
+
+conda env 若需重建：镜像 Python 3.12 + `image.pth` 指向 `/usr/local/Ascend/ascend-toolkit/latest/python/site-packages`（否则报 `No module named 'acl'`，TROUBLESHOOTING A-2）。
+
+### 5.2 数据与模型
+
+```bash
+# 模型（HuggingFace，国内可换 HF_ENDPOINT）
+huggingface-cli download Qwen/Qwen3.5-9B --local-dir ~/models/Qwen3.5-9B
+
+# 数据（DeepEyes 47k，剔除 Chart 防止 OOM）
+python3 recipe/deepeyes/scripts/prepare_data.py --output-dir ~/data/deepeyes
+python3 recipe/deepeyes/scripts/prefilter_deepeyes.py   # 生成 *.filtered_8192.parquet（必做，省 13-16 分钟/次启动）
+```
+
+### 5.3 judge 部署（需要一台空闲卡的机器）
+
+142 当前 judge：Qwen3-30B-A3B-Instruct-2507、TP=8、`--max-model-len 8192`、
+`--override-generation-config '{"max_new_tokens": 64}'`、端口 18901、`--served-model-name judge`。
+重建命令按 142 容器内 `ps` 或 `/workspace` 下的启动脚本还原。训练侧只需：
+
+```bash
+export LLM_AS_A_JUDGE_BASE=http://71.10.29.142:18901/v1
+```
+
+### 5.4 训练启动（单机 8 卡）
+
+```bash
+cd /workspace/verl && bash /workspace/run_full_138.sh     # 正式配置
+# smoke：加 trainer.total_training_steps=1 且调小 batch/长度（见同事 RUNBOOK §7 思路）
+```
+
+必须的开关（都在 run_full_138.sh 里，勿丢）：
+`bypass_mode=True`、`data.filter_overlong_prompts=False`、`data.tool_config_path=<绝对路径>`、
+`weight_nz_mode=0`、`HCCL_SOCKET_IFNAME=enp67s0f0np0`（142 是 `HCCL_SOCKET_IFNAME` 同款问题域，
+多机时端口范围 60000-60050/61000-61050）。
+
+---
+
+## 6. 数据说明
+
+- 来源：DeepEyes `data_0.1.2_visual_toolbox_v2.parquet`（47k 中的 2w+ 子集，细节级 VQA + ground truth）
+- **Chart 子集必须剔除**（高分辨率多子图 → 训练 OOM）；thinklite 分辨率过低（裁剪 <1 patch）
+- 字段：`prompt（system/user）/ images（bytes）/ reward_model.ground_truth / extra_info`
+- 训练用预过滤版：`train.filtered_8192.parquet`（33137 条）/ `val.filtered_8192.parquet`（256 条）
+- tokenizer / tool schema / `max_prompt_length` 变了要重新 prefilter
+
+---
+
+## 7. 我的决定与备忘
+
+- 2026-11-08：训练运行中不碰；评测工程先行（脚本+模型导出完成）；verl 补丁已推 `archted/verl`（ef8e1216）。
+- 2026-11-08：142 无空闲卡（judge TP=8 占满），评测全部排期在 138 训练结束后执行。
+- 2026-11-08：git 提交身份 `archted <1113714753@qq.com>`；token 权限已含 verl 仓库（Workflows RW）。
+
+## 8. 与同事文档的差异点
+
+| 差异 | 同事文档 | 实测 |
+| --- | --- | --- |
+| judge 模型 | RUNBOOK 示例 Qwen2.5-32B；TROUBLESHOOTING 未写明 | 实际 **Qwen3-30B-A3B-Instruct-2507**（TP=8 全占 142 八卡） |
+| 正式训练节点/耗时 | 记录"8 卡（142）79–92 分钟/步" | 当前 run 在 **138**（HDK 25.5.2 + bypass），~29 分钟/步 |
+| 多机 vs 单机 | TROUBLESHOOTING 环境表写"2 节点" | `run_full_138.sh` 实际 `NNODES=1` 单机 |
+| verl 补丁位置 | "复现所需的本地改动"（暗示手工重打） | 已完整推送到 `archted/verl` 分支，直接 clone 即得 |
+
+---
+
+## 9. 命令速查
+
+```bash
+# ===== 监控 =====
+tail -f deepeyes_run/logs/full_outer_138_v3.log                 # 训练日志
+grep -E "critic/score/mean|Training Progress" deepeyes_run/logs/full_outer_138_v3.log | tail
+npu-smi info                                                     # 卡状态
+ssh h00516332@71.10.29.142 "curl -s http://127.0.0.1:18901/v1/models"   # judge 存活
+
+# ===== 评测 =====
+# 起服务/跑评测/导出权重：见 §4（eval_prep/ 内三个脚本）
+
+# ===== git =====
+cd /home/h00516332/atd/verl_project/verl-recipe/yuki && git push          # 推配方仓
+cd /home/h00516332/atd/verl_backup_work && git push                       # 推 verl 补丁仓
+git fetch upstream && git merge upstream/deepeyes-qwen35-npu              # 同步同事更新
+
+# ===== 进容器 =====
+docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec）
+```
+
+## 10. 待办
+
+- [ ] 监控训练至 517 步（预计 11-15）
+- [ ] 训练结束后：导出最终 step → 起服务 → 基线+RL 双评测 → 对比报告
+- [ ] judge prompt 超长问题修复（`_judge_accuracy` 截断 answer_text 或 judge max_model_len↑，TROUBLESHOOTING D-1）
+- [ ] 与主管确认训练完成后的目标（评测报告交付？继续迭代？业务数据？）
+- [ ] 阶段结束后：撤销 GitHub token、删除 `/home/h00516332/atd/.git-credentials`（公共机器安全）
