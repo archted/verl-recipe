@@ -13,7 +13,12 @@ SAVE_CHECKPOINT_DIR=${BASEDIR}/verl_checkpoints
 DATASET_TRAIN=${BASEDIR}/dataset/train.parquet
 DATASET_VAL=${BASEDIR}/dataset/val.parquet
 
-REF_MODEL_PATH=ref_model_path
+# Base model path for the actor/rollout policy. Note that
+# `actor_rollout_ref.model.path` configures the actor (and rollout) model,
+# NOT a separate reference policy: this recipe disables the ref model
+# (algorithm.kl_ctrl.kl_coef=0.0 and use_kl_loss=False), so no ref weights
+# are loaded at all. Override by exporting MODEL_PATH before running.
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen2.5-VL-7B-Instruct}
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     --config-path=${BASEDIR}/recipe/deepeyes/configs \
@@ -27,7 +32,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     algorithm.adv_estimator=grpo \
     algorithm.kl_ctrl.kl_coef=0.0 \
-    actor_rollout_ref.model.path=${REF_MODEL_PATH} \
+    actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
