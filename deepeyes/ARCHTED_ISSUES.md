@@ -54,6 +54,7 @@
 | **I-4** | 监控/文档 | `algorithm.rollout_correction.bypass_mode=True` 后 `actor/entropy` 指标不再产出（TROUBLESHOOTING 提速实验实测），监控面板/告警若依赖该指标会误判 | TROUBLESHOOTING「提速实验」+ 代码（calculate_entropy=False 时不计算） | 候选（需确认上游是否已知/有 issue） | verl issue（先查重）或文档 PR |
 | **I-5** | 推理引擎 | vllm-ascend AOT compile 缓存产物（含 inductor Triton wrapper）在 Ascend 无法加载，每次启动每 worker 重编 1-2 分钟并刷 WARNING（T-#18） | TROUBLESHOOTING #18 | 候选 → 需收集完整日志片段 | **vllm-ascend issue（蓝海，同事零提交）** |
 | **I-6** | 工程健壮性 | 同事 `#8555/#8553` 被关未合并后，配方侧依赖变通（绝对路径 + prefilter），若他人按 README 直接跑会踩同样坑——可在 #167 下评论提醒或在 README 补充说明 | PR 关闭记录 | 候选 | verl-recipe（评论/文档 PR） |
+| **I-8** | 上游配方脚本缺陷 | **verl-recipe 上游 `recipe/deepeyes/run_deepeyes_grpo.sh` 的 `REF_MODEL_PATH` 是死占位符**：第 16 行 `REF_MODEL_PATH=ref_model_path`（字面量，从未赋真实值），第 30 行用作 `actor_rollout_ref.model.path=${REF_MODEL_PATH}` → 照原样运行必然报"路径不存在"。上游 commit 21892b9（migrate recipes from verl #7）带入，非同事改动。修法：改为 `REF_MODEL_PATH=${REF_MODEL_PATH:?set to your base model dir}` 或在 README 标注必填 | `git log -- deepeyes/run_deepeyes_grpo.sh` + 第 16/30 行 | 已验证 → 小 PR（低优先级，但稳定可收） | verl-recipe issue/PR |
 | **I-7** | 待挖掘 | deepeyes.py 其余逻辑（answer 抽取回退链、1000 字符惩罚）、tools/image_zoom_in_tool.py、run_*.sh、prefilter 脚本的逐行 review；`run_deepeyes_grpo_qwen3_5.sh` 的 PYTHON 解析器问题（T-#1 相关）是否已修 | 待做 | 待办 | — |
 
 ## 5. 提交台账（我提交的记录）

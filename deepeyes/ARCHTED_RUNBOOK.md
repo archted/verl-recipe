@@ -6,6 +6,74 @@
 
 ---
 
+## 0. Quickstart（最快上手路径）
+
+### 0.1 看训练数据长什么样
+
+数据**是 DeepEyes 自带的**：开源项目 DeepEyes 发布的
+`data_0.1.2_visual_toolbox_v2.parquet`（约 47k 条），同事用脚本剔除了 Chart 子集并预过滤出
+当前用的 `train.filtered_8192.parquet`（33137 条）/ `val.filtered_8192.parquet`（256 条）。
+字段：`prompt`（system+user 消息）、`images`（图片 bytes）、`reward_model.ground_truth`（标准答案）、
+`extra_info`、`data_source`（数据子集名）。
+
+查看第一条数据（在 138 容器内执行，宿主机 python 缺 pyarrow）：
+
+```bash
+docker exec -it deepeyes bash -c "/workspace/conda/verl/bin/python -c \"
+import pandas as pd
+df = pd.read_parquet('/workspace/data/deepeyes/train.filtered_8192.parquet')
+print('总条数:', len(df))
+r = df.iloc[0]                      # 第一条
+for m in r['prompt']:
+    print('[' + m['role'] + ']', str(m['content'])[:300])
+print('标准答案:', r['reward_model']['ground_truth'])
+print('图片数:', len(r['images']))
+\""
+```
+
+实测第一条（2026-11-08）：问"Which side are the people on?"，标准答案
+"The people are on the left of the image."，带 1 张图。
+
+### 0.2 启动训练
+
+前提：① 8 卡全部空闲（`npu-smi info` 确认）② 142 的 judge 服务存活
+（`ssh h00516332@71.10.29.142 "curl -s http://127.0.0.1:18901/v1/models"`）。
+
+```bash
+# 正式训练（8 卡，单步约 29 分钟，517 步）
+docker exec -d deepeyes bash -c "cd /workspace/verl && \
+  HCCL_SOCKET_IFNAME=enp67s0f0np0 bash /workspace/run_full_138.sh \
+  > /workspace/logs/full_outer_138_v3.log 2>&1"
+
+# 冒烟测试（确认环境能跑通，几步就停）：
+# 编辑 run_full_138.sh 传参加 trainer.total_training_steps=1（或临时小 batch）
+```
+
+冒烟通过后转正式 run（详细开关说明见 §5.4）。
+
+### 0.3 看训练进度与验证结果
+
+```bash
+# 进度与 reward
+grep "Training Progress" /home/h00516332/deepeyes_run/logs/full_outer_138_v3.log | tail -1
+grep -oE "critic/score/mean:[0-9.]+" /home/h00516332/deepeyes_run/logs/full_outer_138_v3.log | tail -5
+
+# 验证集结果：每 TEST_FREQ=80 步自动跑一次 val，结果直接打印在训练日志里
+grep -oE "val-core/[a-z_]+/acc/mean@1:[0-9.]+" /home/h00516332/deepeyes_run/logs/full_outer_138_v3.log
+```
+
+验证结果**只在训练日志（console）里**——当前 `run_full_138.sh` 的 `LOGGER="['console']"`，
+没开 tensorboard/wandb，所以没有独立文件或面板。每条 val 行形如
+`val-core/vstar/acc/mean@1:0.775`（vstar 子集）与 `val-core/thinklite_eureka/acc/...`（另一子集）。
+若想留存曲线，下次启动把 `LOGGER` 改成 `"['console','tensorboard']"`，
+日志会写到 `verl/logs/<experiment_name>/`（tensorboard 事件文件，容器内看）。
+
+### 0.4 跑一次评测
+
+见 §4（三步：起服务 → 跑 eval_agent.py → 出对比报告），10 分钟能跑通 16 条冒烟。
+
+---
+
 ## 1. 这个工作是什么（一段话）
 
 用强化学习（GRPO）训练 Qwen3.5-9B 学会"边看图边思考"：模型推理时自主输出坐标调用**图像放大工具**，
@@ -97,6 +165,9 @@ docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
   `max_actor_ckpt_to_keep=2`、日志 `logs/full_outer_138_v3.log`
 - 进度（2026-11-08）：**step 171/517（33%）**，单步 ~1755s（29 分钟），预计 **11-15 前后训完**
 - reward：`critic/score/mean ≈ 1.26–1.34`（持续上升中）
+- 验证集结果（每 80 步一次，打印在训练日志）：step 80 `val-core/vstar/acc=0.7753`；
+  step 160 `val-core/vstar/acc=0.7079`（vstar 子集回落，样本仅 89 条噪声大）；
+  thinklite_eureka 子集 step 80 acc=0.5897
 - 已知噪声：judge 400 报错 ~8 次/步（prompt 超长被拒，记 0 分，见 TROUBLESHOOTING D-1）
 
 ### 3.2 日常监控命令
