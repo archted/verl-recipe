@@ -68,7 +68,8 @@
 
 **准备中（2026-11-08）：**
 - I-8 issue 文稿：`deepeyes/drafts/I8_issue_verl-recipe.md`（已查重：上游无人提过；#4989 是 deepeyes.py system prompt，不撞车；上游 main 至今未修）
-- I-8 PR 分支：fork `archted/verl-recipe` 分支 `fix-deepeyes-run-script-model-path`（commit bd82d24，基于上游 main，`bash -n` 语法已验）。**提交 PR 前必须签 CLA**
+- I-8 PR 分支：fork `archted/verl-recipe` 分支 `fix-deepeyes-run-script-model-path`（commit bd82d24，基于上游 main，`bash -n` 语法已验）
+- **PR 创建方式（2026-11-08 实测）：细粒度 token 未授权官方仓 PR 写权限，API 创建 403；改用预填 compare 链接手动创建——链接全文在 `deepeyes/drafts/I8_pr_create_url.txt`（已含标题+正文，打开点 "Create pull request" 即可）。archted 已签 CLA。issue 等用户指令再发（用户要求先 PR 后 issue，防抢跑）**
 - DTS 单草稿 ×2：`deepeyes/drafts/DTS_drafts.md`（I-8 联动单 + I-3 文档纠错单），DTS 需 archted 手动提交
 
 ## 6. 教训库（如何让 PR 被收）
