@@ -2,7 +2,8 @@
 
 > 维护人：archted ｜ 创建：2026-11-08 ｜ 由 deepeyes-wiki-keeper skill 持续更新
 > **本手册自包含**：不需要再看同事的 RUNBOOK / TROUBLESHOOTING / 案例文档即可开展工作。
-> 问题记录见姊妹篇 `ARCHTED_TROUBLESHOOTING.md`（同目录）。
+> 问题记录见姊妹篇 `ARCHTED_TROUBLESHOOTING.md`（同目录）；给他人复现用的案例手册见
+> `ARCHTED_CASE.md`（含全量版本清单与新容器搭建步骤）。
 
 ---
 
