@@ -47,6 +47,24 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-1｜正式训练 run 在 step ~183 发生 policy collapse，此后 100+ 步零梯度空转（2026-11-10 发现）
+
+- **现象**：`full_outer_138_v3.log`（run 于 11-04 启动）——
+  - step 165-170：`actor/grad_norm` 从 1.2 飙至 **15.0**（正常 ~0.4-1.2），`ppo_kl` 从 0.002 爬到 0.0089；
+  - step 178-182：score 跌至 0.18 → -0.17，ppo_kl 冲到 **0.057**（严重偏离）；
+  - **step 184 起**：`critic/score/mean` 恒等于 **-0.20000003**（=0.8×0+0.2×(-1)+1.2×0：无答案、判 0 分、无工具），`pg_loss=0`、`grad_norm=0`、`advantages≡0`——所有轨迹奖励完全相同 → 组内优势为零 → **无任何梯度，训练死亡但进程不报错继续跑**；
+  - 佐证：step 240 val 的 `vstar acc=0.0`、`tool_used=0.0`、`answer_length≈38000`（正常 11~1305）；response_length/mean 崩溃后缩到 114。
+- **发现方式**：为回答"怎么看指标图"写了日志解析脚本（`eval_prep/plot_train_metrics.py`），出图后悬崖一目了然。
+- **处理（进行中）**：
+  - 可恢复资产：崩溃前最后的健康点 **step 170 的 HF 导出已存在**：`models/eval_qwen35_9b_step170`（val acc 0.708，但已较 step 80 的 0.775 回落——崩溃前已有劣化迹象）；
+  - ckpts/full 里最新 2 个 checkpoint（~285/290）全是崩溃后权重，无恢复价值；崩溃前 checkpoint 因 `max_actor_ckpt_to_keep=2` 已被覆盖删除；
+  - judge 服务曾被重启（v1/models 的 created 时间戳从 11-08 变为 11-10），但崩溃根因是模型退化（tool_used/answer_length 不依赖 judge），judge 只是并发受害者/巧合。
+- **根因（初步）**：KL 失控（kl_coef=0.0 无 KL 约束 + entropy 未监控）→ grad_norm 尖峰 → 输出分布塌缩到"短输出无答案"模式 → 零方差奖励 → GRPO 无梯度。触发点未定（可能是某步大梯度更新）。
+- **预防（下次 run 必改）**：① LOGGER 加 tensorboard 便于盯曲线；② 监控 `actor/ppo_kl` 与 `actor/grad_norm`（超阈值告警）；③ 评估加小 kl_coef 或 clip 更紧的 pg 上限；④ 期待上游支持"连续 N 步 advantage 全零则 abort"。
+- **关联**：ARCHTED_ISSUES.md I-9（向上游提"零方差奖励静默死亡"告警机制）。
+
+
+
 > 登记模板（复制使用）：
 >
 > ### [日期] 简短标题
