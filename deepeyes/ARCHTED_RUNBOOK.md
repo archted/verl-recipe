@@ -21,9 +21,11 @@
 | 5 | P4 零方差熔断 | ✅ 完成 | `verl/trainer/ppo/ray_trainer.py` `_check_zero_variance_reward`：`critic/score/min==max` 连续 N 步（env `VERL_ZERO_VAR_ABORT_STEPS`，默认 5，0=关）→ raise RuntimeError |
 | 6 | 数据/模型拷贝 | 🔄 后台进行中 | train/val parquet + Qwen3.5-9B → `deepeyes_run_v1/`；完成标记 `.copy_done` |
 | 7 | 重建容器（追加挂载 verl/cache/ray_tmp） | ⏳ 待做 | `docker rm -f deepeyes-v1` + 原 4 挂载 + `-v deepeyes_run_v1/verl:/workspace/verl -v .../cache:/workspace/.cache -v .../ray_tmp:/workspace/ray_tmp` |
-| 8 | 冒烟训练 | ⏳ 待做 | `run_full_v1.sh`（TRAIN_BATCH_SIZE=8、1 step、SAVE_FREQ=1）：rollout→工具成功→judge 判分→reward 合理→ckpt 落盘 |
-| 9 | 推理链路验证 | ⏳ 待做 | model_merger 合并 ckpt→serve(18900, TP=2)→eval_agent --limit 8→停服务 |
-| 10 | 正式 run v2 + watchdog | ⏳ 待做 | nohup 后台启动；监控 score/grad_norm/ppo_kl/tool 成功率；watchdog 每 10min 查日志 |
+| 8 | 冒烟训练 | ✅ **全绿完成**（11-10 16:07） | 1 step 16min；score mean 0.775（min -0.2 max 2.0 有方差）、grad_norm 0.51、ppo_kl 0.0004、kl_coef 0.001；**tool_used 96.6%**（相对坐标工具+标记门控生效）；val acc vstar 65.7%；ckpt `ckpts/v1_smoke/global_step_1` 落盘；tensorboard 已写入 |
+| 8a | 冒烟排障记录 | ✅ | ① `address=auto` 需删（新容器无 Ray，verl 自建）② `/etc/hosts` 缺 localhost → `--add-host localhost:127.0.0.1` ③ **vLLM aot_compile 崩溃 → `VLLM_USE_AOT_COMPILE="0"`（关键修复，hydra 传字符串要加引号 `'"0"'`）**④ pkill 自杀陷阱：`pkill -f main_ppo` 会杀掉含该串的执行 shell |
+| 9 | 推理链路验证 | ✅ **全绿完成**（11-10 17:10） | merger 合并 ckpt→HF（`models/eval_smoke_v1` 18G）→ serve 18900 TP=2 → eval_agent --limit 8：**acc 8/8=100%、tool_call_rate 75%、工具成功率 100%**、多轮最多 5 轮；format_rate 0 属预期（基座无 `<answer>` 标签，RL 将训练） |
+| 9a | 推理排障记录 | ✅ | ① 400 "auto tool choice" → serve 需 `--enable-auto-tool-choice --tool-call-parser qwen_xml`（Qwen3.5 XML 属性式格式）② eval_agent 需复刻训练 prompt（parquet system+user 全文+工具名替换），裸问题会失去格式约束 ③ server 端 parser 把 tool call 解析进 `message.tool_calls`（content 里没有），脚本优先读该字段 ④ 无 `<answer>` 标签时 fallback 取 `</think>` 后文本送 judge（对齐训练 compute_score）⑤ 重启 serve 前必须确保旧进程 HBM 释放（杀干净 EngineCore） |
+| 10 | 正式 run v2 + watchdog | 🔄 运行中（11-10 17:22 启动） | 容器内 `SMOKE=0 bash /workspace/scripts/run_full_v1.sh`（batch 64、SAVE_FREQ=5、TEST_FREQ=80、kl 防护、AOT 关闭）；宿主机 watchdog（`scripts/watchdog.sh`，10min 周期：进程存活+日志心跳+score/grad_norm 采样）→ `logs/watchdog.log` / `watchdog_alert.log`；日志 `logs/v1_full/`，ckpt `ckpts/v1_full/` |
 | 11 | 提交推送 | ⏳ 待做 | 补丁推 archted/verl 分支 deepeyes-qwen35-npu；Wiki push（e25d7a6 待重推） |
 
 关键决策备忘：
