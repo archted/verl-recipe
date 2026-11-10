@@ -47,6 +47,14 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-2｜新容器无法访问 NPU：旧容器"按命名空间独占"设备（2026-11-10）
+
+- **现象**：用 `deepeyes-train-infer:v1` 在 138 本机按 CASE §3 重建容器（`deepeyes-v1`），import 链全部正常，但容器内 `npu-smi info` 报 `dcmi model initialized failed, because the device is used. ret is -8020`，`torch.npu.device_count()=0`。宿主机和旧容器（deepeyes）的 npu-smi 一切正常。
+- **排查过程**（逐项排除，最后 dmesg 定案）：设备节点/挂载/HostConfig/env 全部与旧容器一致；基础镜像同样复现（排除新镜像问题）；依次排除 seccomp、cap-add=ALL、SELinux label、cgroup device rule、--pid=host（均无效）；**只有 --privileged 能绕过**。
+- **根因（dmesg 实锤）**：`[ascend][uda][ERROR] uda_occupy_dev_by_ns: Conflict open udevid (udevid=0; access_ns=a9cad8f3; ns=<新容器ns>)` ——昇腾驱动 UDA 的**按命名空间设备占用机制**：死训练所在旧容器先打开了设备，8 卡被其命名空间（`00000000a9cad8f3`）独占；任何新容器（=新 ns）open 设备即冲突（errno 87=EUSERS → dcmi -8020 "device is used"）。
+- **结论**：旧训练不停，一切新容器都碰不了 NPU（推理/训练/评测全阻塞）；`docker stop deepeyes` 释放占用后新容器立即可用。宿主机 npu-smi 正常是因为宿主 ns 是占用机制的豁免方/管理者。
+- **经验**：① 以后在"有训练在跑"的机器上起新 NPU 容器报 -8020，先查 `dmesg | grep uda_occupy`，不要浪费时间去 bisect 容器参数；② privileged 能绕过说明该检查对特权进程豁免——但**不要**用 privileged 跑训练来绕（两套容器同时操作设备有踩踏风险，且占用语义未验证）；③ 这也是"训练占卡不释放"的另一种表现——E-1 死训练的代价又多了一条。
+
 ### E-1｜正式训练 run 在 step ~183 发生 policy collapse，此后 100+ 步零梯度空转（2026-11-10 发现）
 
 - **现象**：`full_outer_138_v3.log`（run 于 11-04 启动）——
