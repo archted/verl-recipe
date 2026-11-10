@@ -247,3 +247,79 @@ print(r.json()['choices'][0]['message']['content'])\""
 | `/workspace/ckpts/full/global_step_N/` | 训练 checkpoint |
 | `/workspace/eval_prep/` | 评测脚本 + 结果 |
 | `/workspace/logs/` | 训练日志 |
+
+## 9. 一体镜像：导出与在新平台使用（2026-11-10 实测）
+
+### 9.1 镜像是什么
+
+`deepeyes-train-infer:v1`（23.1GB）= 基础镜像 `quay.io/ascend/vllm-ascend:v0.27.1rc1`
+（提供 CANN 9.1.0 / torch 2.10.0.post4 / torch_npu / vllm 0.27.1 栈）
++ conda env（`/workspace/conda/verl`，transformers 5.12.1 / datasets 5.1.0 / ray 2.48.0 等 480M）
++ verl 源码（`/workspace/verl`，基线 3c6d9b43 + 3 补丁，25M）
++ editable 依赖源（`/workspace/tmp/speculators-ascend-preflight`，14M）
++ 训练/评测脚本（`/workspace/run_full_138.sh`、`/workspace/eval_prep/`）。
+
+**训练与推理同一镜像**：训练 rollout 与推理评测用同一 vLLM 栈，已在 138 实证。
+**不含**（刻意排除，~390G）：模型权重、checkpoint、训练数据、ray_tmp、日志、各类缓存——
+这些在新平台按 §4.4/§6.1 重新准备或从 138 拷贝。
+
+产物（138 宿主机）：`/home/h00516332/image_export/deepeyes-train-infer_v1.tar`（22G）
+构建上下文（含 Dockerfile，可复现构建）：`/home/h00516332/deepeyes_run/image_build/`。
+
+### 9.2 导出过程（存档，供重新构建）
+
+```bash
+# ① staging：容器内 root 拷出必要物（bind mount 内容不在容器 fs 里，不能 docker commit！）
+docker exec deepeyes bash -c "mkdir -p /workspace/image_build && cd /workspace && \
+  tar -cf - --exclude='__pycache__' --exclude='*.pyc' \
+    conda/verl verl tmp/speculators-ascend-preflight run_full_138.sh \
+    eval_prep/eval_agent.py eval_prep/serve_eval_model.sh \
+    | tar -C /workspace/image_build -xf - && \
+  rm -rf /workspace/image_build/verl/.ruff_cache && chmod -R a+rX /workspace/image_build"
+# ② Dockerfile（见 image_build/Dockerfile）：FROM v0.27.1rc1 + 5 条 COPY
+cd /home/h00516332/deepeyes_run/image_build && docker build -t deepeyes-train-infer:v1 .
+# ③ 验证（无 NPU 也能跑 import 测试）+ 导出
+docker run --rm deepeyes-train-infer:v1 /workspace/conda/verl/bin/python -c \
+  "import torch, torch_npu, vllm, transformers, verl; print(transformers.__version__)"
+docker save -o /home/h00516332/image_export/deepeyes-train-infer_v1.tar deepeyes-train-infer:v1
+```
+
+### 9.3 新平台使用步骤
+
+```bash
+# ① 导入
+docker load -i deepeyes-train-infer_v1.tar
+
+# ② 起容器（注意：驱动路径按新平台实际内核适配包路径调整）
+docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
+  --device /dev/davinci0 --device /dev/davinci1 --device /dev/davinci2 --device /dev/davinci3 \
+  --device /dev/davinci4 --device /dev/davinci5 --device /dev/davinci6 --device /dev/davinci7 \
+  --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  deepeyes-train-infer:v1
+
+# ③ 环境自检（30 秒）
+docker exec deepeyes bash -c "/workspace/conda/verl/bin/python -c \
+  'import torch, torch_npu, vllm, transformers, verl; print(transformers.__version__)' && \
+  npu-smi info | head -4"
+
+# ④ 数据/模型放进来（子目录挂载或 docker cp，二选一）：
+#    - 训练数据 *.filtered_8192.parquet → /workspace/data/deepeyes/
+#    - 基座模型 Qwen3.5-9B → /workspace/models/Qwen3.5-9B/
+#    - 评测用 checkpoint 合并产物 → /workspace/models/（可选，见 §6.1）
+
+# ⑤ 训练 / 推理：按 §5 / §6 执行（脚本都在镜像里，命令原样可用）
+```
+
+### 9.4 ⚠️ 新平台红线（违反必翻车）
+
+1. **严禁把宿主机目录整体挂载到 `/workspace`**——conda env 和 verl 源码烤在镜像的
+   `/workspace/conda`、`/workspace/verl` 里，整体挂载会全部遮掉（原 138 容器恰好相反，
+   它的 /workspace 是 bind mount，镜像里没有环境——两者布局不同，勿混淆）。
+   需要持久化的数据按子目录挂载：`-v /xxx/data:/workspace/data`、`-v /xxx/logs:/workspace/logs`。
+2. **`HCCL_SOCKET_IFNAME=enp67s0f0np0` 是 138 的网卡名**，换平台必须 `ip addr` 查真实网卡名后替换（`run_full_138.sh` 里两处 + 训练启动命令一处）。
+3. **驱动兼容**：镜像 CANN 9.1.0 要求宿主机 HDK ≥ 25.x（138 实测 25.5.2 通过；25.2.0 可推理，训练特性 ACL graph/IPC 缺失）。
+4. judge 地址：`LLM_AS_A_JUDGE_BASE` 指向的 judge 服务要另行部署（§4.5），镜像不自带 judge 模型。
+
