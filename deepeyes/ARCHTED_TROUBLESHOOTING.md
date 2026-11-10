@@ -47,6 +47,31 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-5｜推理评测 400 "auto tool choice" + 工具调用解析不到（2026-11-10，推理链路验证）
+
+- **现象①**：`/v1/chat/completions` 带 `tools` 参数即 400：`"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser`。
+- **修复①**：serve_eval_model.sh 加 `--enable-auto-tool-choice --tool-call-parser qwen3_xml`（Qwen3.5 的 XML 属性式 `<tool_call><function=x><parameter=y>` 格式对应 qwen3_xml parser；该 vllm 版本 tool_parsers 目录下确认存在）。
+- **现象②**：开了 parser 后 eval 脚本仍解析不到工具调用——server 端 parser 把调用解析进了 OpenAI 响应的 `message.tool_calls` 字段，content 里不再有原始 `<tool_call>` XML，eval 脚本只对 content 做 regex 所以扑空。
+- **修复②**：eval_agent.py 优先读 `message.tool_calls[].function`（name/arguments JSON），regex 作为裸文本兜底。
+- **现象③**：评测 acc=0——eval 脚本自造的 system prompt + 裸问题与训练 prompt 不一致，模型失去格式约束。
+- **修复③**：复刻训练构造（CustomRLHFDataset）：用 parquet 的 system 消息（含 `<tools>` schema）+ user 消息全文（含 `Think first... Format strictly as: <think>...` 指令），并同样做 `image_zoom_in_tool→image_zoom_in_rel_tool` 名称替换。
+- **现象④**：基座模型最终答案不包 `<answer>` 标签 → 训练侧 compute_score 本就有 fallback（无标签记 format error 并取 `</think>` 后文本判分），eval 侧同步补齐 fallback，acc 恢复正常（8/8）。
+- **经验**：**评测脚本的 prompt 构造必须与训练 dataset 完全一致**（同 system、同格式指令、同工具名替换），否则 eval 结果失真；serve 重启前确认旧 EngineCore 进程杀干净（HBM 释放），否则报 "Free memory 9.63/60.96 GiB"。
+
+### E-4｜vLLM 引擎 aot_compile 崩溃（torch 2.10 默认开启 AOT）（2026-11-10，deepeyes-v1 冒烟）
+
+- **现象**：训练 rollout 阶段 vLLM EngineCore 报 `RuntimeError: aot_compile is not supported by the current configuration. Please make sure torch.compile is enabled with the latest version of PyTorch (current using torch: 2.10.0+cpu)`，训练必挂。
+- **根因**：vLLM 0.27.1 的 `envs.py: use_aot_compile()` 在 torch≥2.10 时**默认开启** AOT 编译路径（`VLLM_USE_AOT_COMPILE` 默认 1），而 vllm-ascend nightly (0.27.1rc1) 的 ACL graph 捕获链路走不通该路径。旧容器当年能跑，靠的是 ray daemon 环境或缓存差异，不可复现也无谓深挖。
+- **修复**：在 `run_full_v1.sh` 传 `+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_AOT_COMPILE='"0"'`。**注意 hydra 陷阱：值必须写成 `'\"0\"'`（引号内引号传字符串）**，写 `=0` 会被解析成 int，ray 报 `TypeError: str(dict) expected`。
+- **验证**：改后 Capturing CUDA graphs (PIECEWISE) 35/35 通过，训练/推理均正常。
+
+### E-3｜容器内 localhost 无法解析 → Ray 连接失败（2026-11-10，deepeyes-v1）
+
+- **现象**：新容器内 `socket.gethostbyname("localhost")` 报 `gaierror: Name or service not known`，Ray 初始化 `Could not find any running Ray instance`。
+- **根因**：宿主机 `/etc/hosts` 本身没有 `127.0.0.1 localhost` 条目（机器以 `71.10.29.138 syn-138` 裸奔），docker 默认拷贝宿主 hosts，容器内 glibc 仅靠 `files` 找不到 localhost。
+- **修复**：`docker run` 加 `--add-host localhost:127.0.0.1 --add-host localhost.localdomain:127.0.0.1`。
+- **经验**：重建任何该机器上的容器都要带这两个 add-host（已写进 RUNBOOK §2.4 备忘）。
+
 ### E-2｜新容器无法访问 NPU：旧容器"按命名空间独占"设备（2026-11-10）
 
 - **现象**：用 `deepeyes-train-infer:v1` 在 138 本机按 CASE §3 重建容器（`deepeyes-v1`），import 链全部正常，但容器内 `npu-smi info` 报 `dcmi model initialized failed, because the device is used. ret is -8020`，`torch.npu.device_count()=0`。宿主机和旧容器（deepeyes）的 npu-smi 一切正常。

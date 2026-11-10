@@ -26,13 +26,26 @@
 | 9 | 推理链路验证 | ✅ **全绿完成**（11-10 17:10） | merger 合并 ckpt→HF（`models/eval_smoke_v1` 18G）→ serve 18900 TP=2 → eval_agent --limit 8：**acc 8/8=100%、tool_call_rate 75%、工具成功率 100%**、多轮最多 5 轮；format_rate 0 属预期（基座无 `<answer>` 标签，RL 将训练） |
 | 9a | 推理排障记录 | ✅ | ① 400 "auto tool choice" → serve 需 `--enable-auto-tool-choice --tool-call-parser qwen_xml`（Qwen3.5 XML 属性式格式）② eval_agent 需复刻训练 prompt（parquet system+user 全文+工具名替换），裸问题会失去格式约束 ③ server 端 parser 把 tool call 解析进 `message.tool_calls`（content 里没有），脚本优先读该字段 ④ 无 `<answer>` 标签时 fallback 取 `</think>` 后文本送 judge（对齐训练 compute_score）⑤ 重启 serve 前必须确保旧进程 HBM 释放（杀干净 EngineCore） |
 | 10 | 正式 run v2 + watchdog | 🔄 运行中（11-10 17:22 启动） | 容器内 `SMOKE=0 bash /workspace/scripts/run_full_v1.sh`（batch 64、SAVE_FREQ=5、TEST_FREQ=80、kl 防护、AOT 关闭）；宿主机 watchdog（`scripts/watchdog.sh`，10min 周期：进程存活+日志心跳+score/grad_norm 采样）→ `logs/watchdog.log` / `watchdog_alert.log`；日志 `logs/v1_full/`，ckpt `ckpts/v1_full/` |
-| 11 | 提交推送 | ⏳ 待做 | 补丁推 archted/verl 分支 deepeyes-qwen35-npu；Wiki push（e25d7a6 待重推） |
+| 11 | 提交推送 | ✅ **完成** | archted/verl-recipe @ `deepeyes-qwen35-npu`：894fef4（rel 工具+奖励门控+wiki）；archted/verl @ `deepeyes-qwen35-npu`：6336fc4（零方差熔断）；补丁 diff 备份 `~/tmp_scripts/patches/` |
 
 关键决策备忘：
 - yuki 的 `deepeyes_run/` 一律只读；所有修改只进 `deepeyes_run_v1/`。
 - 防护三件套：LOGGER 加 tensorboard + `use_kl_loss=True, kl_loss_coef=0.001, kl_loss_type=low_var_kl`（`$@` 末尾覆盖）+ P4 熔断。
 - judge：`http://71.10.29.142:18901/v1`（用前 curl 检查）。
 - 冒烟 ckpt → HF 合并后用 `eval_prep/serve_eval_model.sh` + `eval_agent.py --limit 8` 验证推理链。
+
+### 12h 任务最终交付摘要（11-11 03:20 CST 更新）
+
+| 链路 | 状态 | 证据 |
+|------|------|------|
+| 训练（冒烟） | ✅ | 1 step 16min：score 0.775（min -0.2/max 2.0）、grad_norm 0.51、tool_used 96.6%、val acc 65.7% |
+| 训练（正式 v2） | ✅ 运行中 | 17:22 UTC 启动，step1/2 全健康（score 0.948/0.760、grad_norm<0.3、ppo_kl<0.001、num_turns 4.4）；~46min/step；watchdog 每 10min 巡检 |
+| ckpt→HF 合并 | ✅ | `verl.model_merger merge --backend fsdp`（fsdp2 权重通用）；`models/eval_smoke_v1` 18G |
+| vLLM 推理服务 | ✅ | TP=2 端口 18900；必须带 `--enable-auto-tool-choice --tool-call-parser qwen3_xml` |
+| 多轮工具评测 | ✅ | eval_agent --limit 8：acc 100%、tool_call_rate 75%、工具成功率 100%（相对坐标 0-1000 全链路通） |
+| 代码提交 | ✅ | verl-recipe 894fef4 + verl 6336fc4（均 archted fork 的 deepeyes-qwen35-npu 分支） |
+
+接手要点：正式 run 的结果看 `deepeyes_run_v1/logs/v1_full/`（容器 `/workspace/logs/v1_full/`），tensorboard 同目录；watchdog 报警看 `deepeyes_run_v1/logs/watchdog_alert.log`（无内容=正常）；恢复训练直接容器内 `SMOKE=0 bash /workspace/scripts/run_full_v1.sh`。
 
 ---
 
