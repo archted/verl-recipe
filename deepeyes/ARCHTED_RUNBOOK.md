@@ -7,6 +7,33 @@
 
 ---
 
+## ⭐ 12h 自主任务进度板（2026-11-10 晚启动，防会话中断）
+
+目标：新容器 `deepeyes-v1`（挂载 `deepeyes_run_v1`）内，按案例文档修正代码后把**训练+推理全链路**拉通。
+
+| # | 阶段 | 状态 | 产出/位置 |
+|---|------|------|-----------|
+| 0 | 停旧容器释放 8 卡 | ✅ 完成 | `docker stop deepeyes`；E-2 验证：v1 容器 device_count=8 |
+| 1 | verl 补丁副本 | ✅ 完成 | `deepeyes_run_v1/verl`（自 `deepeyes_run/verl` 只读复制，源未动） |
+| 2 | P1 相对坐标工具 | ✅ 完成+单测过 | `recipe/deepeyes/tools/image_zoom_in_tool_rel.py`（`ImageZoomInToolRelative`，MIN_DIMENSION=28，0-1000→像素换算，成功文本含 `(relative: {bbox_2d})`；坐标换算/clamp/resize/失败-0.05 全部断言通过） |
+| 3 | P2 工具配置 | ✅ 完成 | `configs/image_zoom_in_rel_tool_config.yaml`（schema 名 `image_zoom_in_rel_tool`，bbox 注明 0-1000 归一化） |
+| 4 | P3 数据集+奖励 | ✅ 完成+单测过 | `deepeyes.py`：TOOL_NAME→`image_zoom_in_rel_tool`；user content 替换工具名；`TOOL_SUCCESS_MARKER="Zoomed in on the image to the region (relative:"`，tool_reward 门控改 marker∧acc>0.5，metrics 加 `tool_called`（诊断）；旧格式文本 tool_used=0 已验证 |
+| 5 | P4 零方差熔断 | ✅ 完成 | `verl/trainer/ppo/ray_trainer.py` `_check_zero_variance_reward`：`critic/score/min==max` 连续 N 步（env `VERL_ZERO_VAR_ABORT_STEPS`，默认 5，0=关）→ raise RuntimeError |
+| 6 | 数据/模型拷贝 | 🔄 后台进行中 | train/val parquet + Qwen3.5-9B → `deepeyes_run_v1/`；完成标记 `.copy_done` |
+| 7 | 重建容器（追加挂载 verl/cache/ray_tmp） | ⏳ 待做 | `docker rm -f deepeyes-v1` + 原 4 挂载 + `-v deepeyes_run_v1/verl:/workspace/verl -v .../cache:/workspace/.cache -v .../ray_tmp:/workspace/ray_tmp` |
+| 8 | 冒烟训练 | ⏳ 待做 | `run_full_v1.sh`（TRAIN_BATCH_SIZE=8、1 step、SAVE_FREQ=1）：rollout→工具成功→judge 判分→reward 合理→ckpt 落盘 |
+| 9 | 推理链路验证 | ⏳ 待做 | model_merger 合并 ckpt→serve(18900, TP=2)→eval_agent --limit 8→停服务 |
+| 10 | 正式 run v2 + watchdog | ⏳ 待做 | nohup 后台启动；监控 score/grad_norm/ppo_kl/tool 成功率；watchdog 每 10min 查日志 |
+| 11 | 提交推送 | ⏳ 待做 | 补丁推 archted/verl 分支 deepeyes-qwen35-npu；Wiki push（e25d7a6 待重推） |
+
+关键决策备忘：
+- yuki 的 `deepeyes_run/` 一律只读；所有修改只进 `deepeyes_run_v1/`。
+- 防护三件套：LOGGER 加 tensorboard + `use_kl_loss=True, kl_loss_coef=0.001, kl_loss_type=low_var_kl`（`$@` 末尾覆盖）+ P4 熔断。
+- judge：`http://71.10.29.142:18901/v1`（用前 curl 检查）。
+- 冒烟 ckpt → HF 合并后用 `eval_prep/serve_eval_model.sh` + `eval_agent.py --limit 8` 验证推理链。
+
+---
+
 ## 0. Quickstart（最快上手路径）
 
 ### 0.1 看训练数据长什么样
@@ -72,6 +99,45 @@ grep -oE "val-core/[a-z_]+/acc/mean@1:[0-9.]+" /home/h00516332/deepeyes_run/logs
 ### 0.4 跑一次评测
 
 见 §4（三步：起服务 → 跑 eval_agent.py → 出对比报告），10 分钟能跑通 16 条冒烟。
+
+### 0.5 142 利用率保持（2026-11-10 新增运维项）
+
+**目标**：142 八卡 AICore 利用率 >50%（对外展示/资源占位）。**方案**：双管齐下——
+① 每卡跑一个矩阵乘"烧卡"进程（占空比 75/20，~800MB 显存）；② 给 judge 打持续并发请求（真实负载）。
+
+**关键实测结论**（重要，别再踩）：
+- judge 是 MoE 模型（A3B，激活参数少），纯 HTTP 打流**最多只能拉到 AICore 10-17%**
+  （256 并发、~5000 token prompt、34 req/s 时功耗 95→140W，但 npu-smi AICore% 仍低）；
+- 并发 >256 会被 vLLM `max_num_seqs=256` 上限 + 连接拒绝导致 100% 失败（`fail=100%`）；
+  客户端并发上限 **256**（双进程 2×160 合计 ~37 req/s 也到顶，服务端批处理是瓶颈）；
+- prompt 倍数（judge_load.py 的 --multiplier）：**6 是安全上限**（prompt_tokens≈5092，
+  max_model_len 8192）；7 也实测 200 OK（5935），再大必 400；
+- 烧卡进程（npu_burn.py）**必须配合 `ASCEND_RT_VISIBLE_DEVICES=$d` 且进程内 `set_device(0)`**
+  （重映射后逻辑号恒为 0，set_device(物理号) 报 107001 Invalid device ID）；
+- 叠加后实测：**8 卡 AICore 63-97%，稳定 >50%**；温度 70-86°C（正常），功耗 ~330-370W/卡；
+- 副作用：judge 响应变慢（34→3 req/s），138 训练的 judge 打分调用会稍慢但功能正常。
+
+**重启/运维命令**（142 容器内；容器重启后两个脚本都会消失，需重跑）：
+
+```bash
+# ① 烧卡（8 进程，每卡一个）
+docker exec deepeyes bash -c "for d in 0 1 2 3 4 5 6 7; do \
+  ASCEND_RT_VISIBLE_DEVICES=\$d nohup /workspace/conda/verl/bin/python \
+  /workspace/eval_prep/npu_burn.py --run-ms 75 --sleep-ms 20 \
+  >> /workspace/eval_prep/npu_burn.log 2>&1 < /dev/null & done"
+# ② judge 打流（2 进程 ×160 并发）
+docker exec deepeyes bash -c "for i in 1 2; do nohup /workspace/conda/verl/bin/python \
+  /workspace/eval_prep/judge_load.py --concurrency 160 --multiplier 6 --max-tokens 32 \
+  --port 18901 >> /workspace/eval_prep/judge_load.log 2>&1 < /dev/null & done"
+# 停止
+docker exec deepeyes bash -c "pkill -f npu_bur[n]; pkill -f judge_loa[d]"
+# 查看利用率（详情行）
+npu-smi info | grep 0000:
+```
+
+**健康红线**：卡温 >90°C 时把 `--run-ms 75 --sleep-ms 20` 放宽为 `--run-ms 60 --sleep-ms 40`；
+脚本在 142 容器内 `/workspace/eval_prep/`（源文件在 138 `/home/h00516332/deepeyes_run/eval_prep/`，
+scp 同步）。
 
 ---
 
