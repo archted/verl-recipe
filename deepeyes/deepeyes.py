@@ -31,8 +31,14 @@ from verl.utils.dataset.rl_dataset import RLHFDataset
 
 logger = logging.getLogger(__name__)
 
-TOOL_NAME = "image_zoom_in_tool"
+TOOL_NAME = "image_zoom_in_rel_tool"
 AGENT_NAME = "tool_agent"
+
+# Literal prefix of the success text returned by ImageZoomInToolRelative
+# (see tools/image_zoom_in_tool_rel.py). Its presence in the rollout string
+# proves the tool call actually executed, not merely that a <tool_call> tag
+# was emitted.
+TOOL_SUCCESS_MARKER = "Zoomed in on the image to the region (relative:"
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant. You can call functions to assist with the user query. "
@@ -58,6 +64,16 @@ class CustomRLHFDataset(RLHFDataset):
         if user_content is None:
             extra_info = row_dict.get("extra_info") or {}
             raise ValueError(f"No user message found in prompt of row {extra_info.get('index')}")
+
+        # The dataset prompts reference the Qwen2.5-VL absolute-coordinate tool
+        # name; rewrite to the Qwen3.5 relative-coordinate tool so the prompt,
+        # the injected tool schema and the reward marker all agree.
+        if isinstance(user_content, str):
+            user_content = user_content.replace("image_zoom_in_tool", "image_zoom_in_rel_tool")
+        elif isinstance(user_content, list):
+            for block in user_content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    block["text"] = block["text"].replace("image_zoom_in_tool", "image_zoom_in_rel_tool")
 
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -262,7 +278,13 @@ def compute_score(
         re.search(r"<tool_call>.*?</tool_call>", solution_str, re.DOTALL)
         or re.search(r"<tool_response>.*?</tool_response>", solution_str, re.DOTALL)
     )
-    tool_reward = 1.0 if has_tool_usage and acc_reward > 0.5 else 0.0
+    # A <tool_call> tag only proves the model *attempted* a call. Qwen3.5 can
+    # emit calls whose arguments fail validation inside the tool, which the
+    # case study identified as a reward-hacking vector. Only a successful
+    # execution returns the literal success marker, so gate the tool reward on
+    # it (case-study verified practice for Qwen3.5).
+    tool_success = TOOL_SUCCESS_MARKER in solution_str
+    tool_reward = 1.0 if tool_success and acc_reward > 0.5 else 0.0
     format_reward = -1.0 if is_format_error else 0.0
 
     final_score = 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
@@ -270,7 +292,10 @@ def compute_score(
         "score": final_score,
         "acc": acc_reward,
         "format": format_reward,
-        "tool_used": float(has_tool_usage),
+        # tool_used = tool actually executed successfully (reward-relevant);
+        # tool_called = a <tool_call> attempt was present (diagnostic only).
+        "tool_used": float(tool_success),
+        "tool_called": float(has_tool_usage),
         "format_error": float(is_format_error),
         "answer_length": len(answer_text),
     }
