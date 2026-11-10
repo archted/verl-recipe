@@ -129,3 +129,5 @@ logs
 log
 outputs
 .history
+# DTS issue drafts (local only, never push to GitHub)
+deepeyes/pr_issue/

@@ -60,6 +60,20 @@
 
 ## 5. 提交台账（我提交的记录）
 
+### 5.0 DTS 问题单文档（已备好待提交，2026-11-10）
+
+> 文档在本地 `deepeyes/pr_issue/`（**已加 .gitignore，永不提交 GitHub**），按 `pr_issue/DTS问题单模板.docx`
+> 字段结构生成（问题现象/操作步骤/预期结果/实际结果/原因定位/修复建议），提交后回填单号到下表：
+
+| 本地文档 | 对应问题 | 截图 | 状态 |
+| --- | --- | --- | --- |
+| `DTS-001_E1-I9_GRPO零方差奖励致训练静默死亡.docx` | E-1 / I-9（合并一单） | 嵌入 1_score/3_grad_norm/4_kl 三图 | ✅ 待提交 |
+| `DTS-002_I1_judge评分prompt超长400致奖励污染.docx` | I-1 | 无（代码/日志证据） | ✅ 待提交 |
+| `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2 | 无（代码证据） | ✅ 待提交 |
+| `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 无（文档比对） | ✅ 待提交 |
+
+（截图独立文件 1_score.png / 3_grad_norm.png / 4_kl.png 也在 pr_issue/ 备份，DTS 系统若需单独传图可直接取用。）
+
 > 模板：`| 日期 | 渠道 | 编号/链接 | 内容 | 状态 |`
 > **PR 流程**：①fork ②**签 CLA**（cla-assistant.io/verl-project/verl，用 archted 账号）③分支基于最新 main ④改动最小化+带复现证据 ⑤关联同事 open 的 #167（配方类）避免重复开题
 
