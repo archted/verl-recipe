@@ -57,6 +57,7 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 - **为什么现在没炸**：正式 run 走 `run_full_v1.sh`，它显式覆盖了 `data.tool_config_path` 与 `actor_rollout_ref.rollout.multi_turn.tool_config_path` 都指向 rel 配置。**只有绕开 run_full_v1 才会踩**。
 - **修复**：把 recipe 默认值改对（yaml + `run_deepeyes_grpo_qwen3_5.sh` 默认 rel 配置），不要依赖启动脚本覆盖。判别命令：`grep -n "tool_config_path" <yaml> <run.sh>` 必须全部命中 `image_zoom_in_rel_tool_config.yaml`。
 - **自检**：跑 1 步后 `grep -c "Unknown function\|Missing required 'image'" <log>` 必须为 0。
+- **状态**：✅ **已修（2026-11-11）**。`configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36` 与 `run_deepeyes_grpo_qwen3_5.sh:165` 默认值已改为 `image_zoom_in_rel_tool_config.yaml`；rel 配置的 schema `name` = `image_zoom_in_rel_tool` = `deepeyes.py:34` 的 `TOOL_NAME` = 数据集 `tools_kwargs` 键，三者一致。下次启动生效（当前 run 由 `run_full_v1.sh` 覆盖，行为不变）。
 
 ### E-10｜judge 返回 400（prompt 超 max_model_len）→ 答对样本被静默记 0 分（2026-11-11，案例一致性审计）
 
@@ -68,6 +69,13 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
   2. judge 请求显式带 `max_tokens: 16`（判定只需一个词），并把 judge `max_model_len` 提到 16384；
   3. 加一个计数器：400 次数 / 总 judge 调用数，打到 `reward_extra_info` 里，便于早期发现。
 - **验证**：改完后 `grep -c "Chat completion request failed" <log>` 应为 0，且 `answer_length` 分布不再触顶。
+- **状态**：✅ **已修（2026-11-11）**，第 1、2 项已落地、第 3 项只做了一半：
+  - `deepeyes.py` 新增 `_JUDGE_MAX_QUESTION_CHARS=1000` / `_JUDGE_MAX_GT_CHARS=1000` / `_JUDGE_MAX_ANSWER_CHARS=2000`（answer 取**尾部**），在 `_judge_accuracy` 入口处截断；
+  - payload 增加 `"max_tokens": 16`；
+  - 失败日志改为 `Chat completion request failed: {e} (total N)`，`N` 为进程内累计失败数（方便直接 grep 计数）。
+  - 容器内 monkeypatch 实测：question 5000 / GT 2000 / answer 12000 字符输入 → prompt **4539 字符**（原 ~19000），尾部 `Final answer is left.` 保留。
+  - judge `max_model_len` 仍为 8192（截断后够用，不重启服务）；失败计数尚未写入 `reward_extra_info`。
+  - 下次启动生效；当前 run 继续用旧代码，本轮 400 仍会出现，属预期。
 
 ### E-9｜opencode 自定义模型 token 上限字段：v2 用 limit，v1 风格 maxOutputTokens 被静默忽略（2026-11-11，容器内 opencode + judge）
 

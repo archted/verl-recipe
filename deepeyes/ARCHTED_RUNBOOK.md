@@ -4,7 +4,7 @@
 > **本手册自包含**：不需要再看同事的 RUNBOOK / TROUBLESHOOTING / 案例文档即可开展工作。
 > 问题记录见姊妹篇 `ARCHTED_TROUBLESHOOTING.md`（同目录）；给他人复现用的案例手册见
 > `ARCHTED_CASE.md`（主线=一体镜像）+ `ARCHTED_CASE_newbuild.md`（从零搭建存档）。
-> **与参考案例文档的逐章一致性审计见 §11**（2026-11-11，含 P0/P1 待修项）。
+> **与参考案例文档的逐章一致性审计见 §11**（2026-11-11；P0-1 工具接线 / P1-4 judge 截断已修，P0-2 数据单源已备开关，见 §11.7）。
 
 ---
 
@@ -494,9 +494,9 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 - [ ] judge prompt 超长问题修复（`_judge_accuracy` 截断 answer_text 或 judge max_model_len↑，TROUBLESHOOTING D-1）
 - [ ] 与主管确认训练完成后的目标（评测报告交付？继续迭代？业务数据？）
 - [ ] 阶段结束后：撤销 GitHub token、删除 `/home/h00516332/atd/.git-credentials`（公共机器安全）
-- [ ] **P0**：修 `tool_config_path` 默认接线（yaml + `run_deepeyes_grpo_qwen3_5.sh` 指向 rel 配置），见 §11.4 / TROUBLESHOOTING E-11
-- [ ] **P0**：val 换成纯 vstar 子集（≥1000 条），train 增加 vstar-only 开关，见 §11.4
-- [ ] **P1**：judge 请求截断 + 400 计数，见 TROUBLESHOOTING E-10
+- [x] **P0**：修 `tool_config_path` 默认接线（yaml + `run_deepeyes_grpo_qwen3_5.sh` 指向 rel 配置），见 §11.4 / TROUBLESHOOTING E-11 —— ✅ 2026-11-11 已改（下次启动生效）
+- [ ] **P0**：val 换成纯 vstar 子集（≥1000 条），train 增加 vstar-only 开关，见 §11.4 —— 🟡 开关已加（`--vstar-only`），数据待下一轮重新生成
+- [x] **P1**：judge 请求截断 + 400 计数，见 TROUBLESHOOTING E-10 —— ✅ 2026-11-11 已改（截断 + `max_tokens=16` + 失败计数进日志；未进 `reward_extra_info`）
 
 ---
 
@@ -514,6 +514,8 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 另有训练参数成体系偏离（KL / offload / torch_compile / 16384 响应 / TP=2 / micro-batch=1 等），**意味着本 run 的曲线、耗时、精度都不能直接套用案例结论**。
 
 逐条判定合计：**✅ 38 项、⚠️ 30 项、❗ 17 项、❓ 3 项**（❗ 归并为 §11.3 的 12 条差异，其中 P0 2 条、P1 3 条）。
+
+**后续动作（2026-11-11）：P0-1（工具接线）、P1-4（judge 截断）已修，P0-2（数据单源）已备开关** —— 详见 §11.7。所有改动都是源码级，**下次启动才生效，当前 run 不受影响**。
 
 ### 11.2 逐章节对照
 
@@ -694,13 +696,13 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 
 **P0 — 会让训练信号失真或静默失效，下一轮 run 前必修**
 
-1. **工具接线不一致**：yaml + 默认脚本指绝对坐标工具，数据集用 rel 名 → 绕开 `run_full_v1.sh` 时所有工具调用失败且不报错（E-11）。证据：`configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36`、`run_deepeyes_grpo_qwen3_5.sh`、`deepeyes.py:34`、`tool_agent_loop.py:457,485`。
-2. **数据混入 thinklite_eureka 10953 条**：案例明确排除；无工具指令、`ability=math`、`extra_info.answer` 为空；val 也混了 78 条。证据：`scripts/prepare_data.py:35`、`data/deepeyes/*.filtered_8192.parquet` 统计。
+1. **工具接线不一致**：yaml + 默认脚本指绝对坐标工具，数据集用 rel 名 → 绕开 `run_full_v1.sh` 时所有工具调用失败且不报错（E-11）。证据：`configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36`、`run_deepeyes_grpo_qwen3_5.sh`、`deepeyes.py:34`、`tool_agent_loop.py:457,485`。**✅ 已修（2026-11-11）**：yaml 第 36 行与 run 脚本第 165 行都改成 `image_zoom_in_rel_tool_config.yaml`；rel 配置的函数名 `image_zoom_in_rel_tool` = `deepeyes.py:34` 的 `TOOL_NAME` = 数据集 `tools_kwargs` 的 key。下次启动生效（当前 run 由 `run_full_v1.sh` 覆盖，不受影响）。
+2. **数据混入 thinklite_eureka 10953 条**：案例明确排除；无工具指令、`ability=math`、`extra_info.answer` 为空；val 也混了 78 条。证据：`scripts/prepare_data.py:35`、`data/deepeyes/*.filtered_8192.parquet` 统计。**🟡 已备开关（2026-11-11）**：`prepare_data.py` 新增 `--vstar-only`（按 `data_source == "vstar"` 过滤），尚未重新生成数据 —— 当前 run 进行中，换数据本轮不生效，下一轮用 §11.5 第 2 条的命令重跑。
 
 **P1 — 让"和案例比"这件事失去意义，或持续注入奖励噪声**
 
 3. **val 口径**：256 条混源 vs 案例 1118 条单源 → 不能用 0.70–0.78 判定成败。
-4. **judge 400（已观测 85 次）**：`acc` 静默记 0（E-10）。
+4. **judge 400（已观测 85 次）**：`acc` 静默记 0（E-10）。**✅ 已修（2026-11-11）**：`_judge_accuracy` 在拼接前截断（question 1000 / GT 1000 / answer 保留尾部 2000 字符，`<answer>` 在尾部所以不丢），请求带 `max_tokens=16`，失败次数进日志 `(total N)`；容器内 monkeypatch 实测 prompt 从 ~19000 字符降到 4539 字符、尾部 `Final answer is left.` 保留。judge `max_model_len` 仍是 8192，截断后已够用，暂不重启 judge。
 5. **训练参数成体系偏离**：`use_kl_loss`、`torch_compile`、offload 全开、16384 响应、TP=2、micro-batch=1、test_freq=80 → 曲线形态/耗时/稳定边界都与案例不同，不能拿案例阈值当验收线。
 
 **P2 — 一致性/健壮性问题，记录在案**
@@ -732,7 +734,10 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 
 1. **接线（10 分钟）**：yaml + `run_deepeyes_grpo_qwen3_5.sh` 默认改 `image_zoom_in_rel_tool_config.yaml`；跑 1 步冒烟，`grep -c "Unknown function\|Missing required 'image'"` 必须为 0。
 2. **数据（半天）**：`prepare_data.py` 加 `--vstar-only`，train = vstar 22184，val = 从 vstar 里切 ≥1118 条（`test_ratio=0.05`），与案例口径对齐；thinklite 若要保留，作为单独实验并单独统计。
+   → **开关已加**；生成命令（先换输出目录，别覆盖正在用的数据）：
+   `python3 recipe/deepeyes/scripts/prepare_data.py --vstar-only --val-size 1118 --output-dir ~/data/deepeyes_vstar`
 3. **judge（1 小时）**：`answer_text` 截断（保留尾部）+ 请求带 `max_tokens=16` + judge `max_model_len` 提到 16384 + 400 计数进 `reward_extra_info`（E-10）。
+   → **截断 + `max_tokens` + 失败计数已落地**；`max_model_len` 仍 8192（截断后够用），400 计数目前只进日志，未进 `reward_extra_info`。
 4. **参数对齐（下一轮 run 前决策）**：先把 `max_response_length` 降到 8192、`test_freq` 降到 10，其余（KL、offload、torch_compile、TP）保持现状但在 Wiki 里明确"与案例不可比"，避免误读。
 5. **可选**：补 `disable_mm_preprocessor_cache=True`；把工具换成 ThreadMode 池（若 profiling 显示 tool 阶段是瓶颈）。
 
@@ -757,4 +762,26 @@ grep -c "Chat completion request failed: 400" /home/h00516332/deepeyes_run_v1/lo
 # 工具调用是否真的成功（0 = 正常）
 grep -c "Unknown function\|Missing required 'image'\|Skipping malformed" /home/h00516332/deepeyes_run_v1/logs/v1_full/nohup.log
 ```
+
+### 11.7 本轮已落地的修复（2026-11-11）
+
+原则：**只改代码，不动正在运行的训练**。源码改动要下次启动才生效，当前 run 继续用内存里的旧代码，日志/ckpt 不受任何影响。
+
+| # | 改动 | 文件（配方仓 + 运行副本，两份同步） | 生效时机 |
+| --- | --- | --- | --- |
+| 1 | 默认工具配置改相对坐标工具：`image_zoom_in_tool_config.yaml` → `image_zoom_in_rel_tool_config.yaml` | `configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36`、`run_deepeyes_grpo_qwen3_5.sh:165` | 下次启动 |
+| 2 | judge prompt 截断：question 1000 / GT 1000 字符（保留头部）+ answer 2000 字符（**保留尾部**，`<answer>` 在尾部）；请求加 `max_tokens=16`；失败计数进日志 `(total N)` | `deepeyes.py`（`_JUDGE_MAX_*` 常量 + `_judge_accuracy` 入口 + payload） | 下次启动 |
+| 3 | `prepare_data.py --vstar-only`：按 `data_source == "vstar"` 过滤，给"数据单源"留一条命令的开关（本轮不重生成数据） | `scripts/prepare_data.py` | 手动执行时 |
+
+验证记录：
+
+- 两份 `deepeyes.py` 逐字节一致；`py_compile` 通过。
+- 容器内 monkeypatch `_post_judge` 实测（v1 环境，`datasets 5.1.0`）：超长 question(5000)/GT(2000)/answer(12000) 输入下 **prompt 4539 字符**（原 ~19000），尾部 `Final answer is left.` 保留，`max_tokens=16` 生效。
+- `prepare_data.py --help` 正常；`Dataset.filter(input_columns=...)` 在容器内 datasets 5.1.0 上实测可用。
+
+**未做（有意）**：
+
+- 不重生成数据集（当前 run 进行中，换数据本轮不生效；要换时按 §11.5 第 2 条命令跑）。
+- 不改 judge `max_model_len`（截断后 8192 够用，避免再次打断 judge 服务）。
+- 不动训练参数（KL / offload / torch_compile / TP / micro-batch / test_freq），这些只影响"与案例可比性"，不影响正确性，留待下一轮 run 前决策。
 

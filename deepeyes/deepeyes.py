@@ -168,6 +168,15 @@ _JUDGE_NEXT_PROBE = 0.0
 _JUDGE_TEMPLATE_KWARGS = True
 _JUDGE_PROBE_INTERVAL = 60.0
 
+# The judge server runs with a small context window (8192 tokens). Long rollouts
+# used to overrun it and get HTTP 400, which silently scored the sample 0. Cap
+# the variable parts of the prompt; keep the TAIL of the model answer because
+# the final ``<answer>`` block lives there.
+_JUDGE_MAX_ANSWER_CHARS = 2000
+_JUDGE_MAX_GT_CHARS = 1000
+_JUDGE_MAX_QUESTION_CHARS = 1000
+_JUDGE_FAILURES = 0
+
 
 def _judge_headers() -> dict[str, str]:
     api_key = os.environ.get("LLM_AS_A_JUDGE_API_KEY", "").strip()
@@ -318,9 +327,16 @@ def _post_judge(base_url: str, payload: dict[str, Any]) -> requests.Response:
 
 
 def _judge_accuracy(question_text: str, ground_truth: str, answer_text: str) -> float:
+    global _JUDGE_FAILURES
+
     base_url, model_name = _get_judge()
     if not base_url or not model_name:
         return 0.0
+
+    # Keep the judge prompt inside the server context (see _JUDGE_MAX_* above).
+    question_text = (question_text or "")[: _JUDGE_MAX_QUESTION_CHARS]
+    ground_truth = (ground_truth or "")[: _JUDGE_MAX_GT_CHARS]
+    answer_text = (answer_text or "")[-_JUDGE_MAX_ANSWER_CHARS :]
 
     system_prompt = (
         "You are an expert evaluator. Your task is to determine if a model's answer is semantically equivalent to a "
@@ -361,6 +377,9 @@ def _judge_accuracy(question_text: str, ground_truth: str, answer_text: str) -> 
         ],
         "seed": random.randint(0, 1000000),
         "temperature": 0.1,
+        # The verdict is a single word; a small cap keeps the request cheap and
+        # leaves head-room inside max_model_len.
+        "max_tokens": 16,
         # vLLM / SGLang accept chat-template kwargs as a top-level field.
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -373,7 +392,8 @@ def _judge_accuracy(question_text: str, ground_truth: str, answer_text: str) -> 
             break
         except Exception as e:
             if attempt == 2:
-                logger.warning(f"Chat completion request failed: {e}")
+                _JUDGE_FAILURES += 1
+                logger.warning(f"Chat completion request failed: {e} (total {_JUDGE_FAILURES})")
                 return 0.0
             time.sleep(1.0 + attempt)
 

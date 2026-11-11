@@ -33,7 +33,7 @@ actor_rollout_ref:
       max_assistant_turns: 5
       max_user_turns: 5
       max_parallel_calls: 1
-      tool_config_path: "recipe/deepeyes/configs/image_zoom_in_tool_config.yaml"
+      tool_config_path: "recipe/deepeyes/configs/image_zoom_in_rel_tool_config.yaml"
       # Qwen3.5 emits XML tool calls.
       format: qwen3_coder
 

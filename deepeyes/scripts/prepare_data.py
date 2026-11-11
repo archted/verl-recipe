@@ -21,6 +21,7 @@ ratios, writes train/val parquet and prints a vision-token report.
     python3 recipe/deepeyes/scripts/prepare_data.py --output-dir ~/data/deepeyes
     python3 recipe/deepeyes/scripts/prepare_data.py --stats-only
     python3 recipe/deepeyes/scripts/prepare_data.py --local-parquet /data/deepeyes/*.parquet
+    python3 recipe/deepeyes/scripts/prepare_data.py --vstar-only --val-size 1118
 """
 
 import argparse
@@ -50,6 +51,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-chart", action="store_true", help=f"Also use {CHART_FILE}.")
     parser.add_argument("--output-dir", default=str(Path.home() / "data" / "deepeyes"), help="Output directory.")
     parser.add_argument("--val-size", type=int, default=256, help="Number of validation samples.")
+    parser.add_argument(
+        "--vstar-only",
+        action="store_true",
+        help=(
+            "Keep only data_source == 'vstar'. The reference recipe trains on VisualToolbox + V* only; "
+            "the thinklite_eureka shard has an empty extra_info.answer, so the online judge can never "
+            "score it and its reward is a constant floor."
+        ),
+    )
     parser.add_argument("--min-side", type=int, default=QWEN35_RESIZE_FACTOR, help="Upscale images below this side.")
     parser.add_argument("--max-aspect-ratio", type=float, default=200.0, help="Pad images with a larger aspect ratio.")
     parser.add_argument("--max-samples", type=int, default=-1, help="Keep at most this many samples (debugging).")
@@ -197,6 +207,13 @@ def main() -> None:
         part = part.add_column("__deepeyes_source_file", [Path(path).name] * len(part))
         parts.append(part)
     dataset = concatenate_datasets(parts).shuffle(seed=args.seed)
+
+    if args.vstar_only:
+        if "data_source" not in dataset.column_names:
+            raise ValueError("--vstar-only requires a 'data_source' column")
+        before = len(dataset)
+        dataset = dataset.filter(lambda source: source == "vstar", input_columns="data_source")
+        print(f"--vstar-only: kept {len(dataset)} / {before} samples")
 
     if args.max_samples > 0:
         dataset = dataset.select(range(min(args.max_samples, len(dataset))))
