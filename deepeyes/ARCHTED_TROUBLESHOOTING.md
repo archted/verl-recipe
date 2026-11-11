@@ -47,6 +47,20 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-9｜opencode 自定义模型 token 上限字段：v2 用 limit，v1 风格 maxOutputTokens 被静默忽略（2026-11-11，容器内 opencode + judge）
+
+- **现象**：容器内 opencode 调本地 judge（vLLM，max_model_len=8192）报 `max_completion_tokens=32000 cannot be greater than max_model_len=8192`——配置里明明写了 `maxOutputTokens: 8192`。
+- **根因**：opencode v2.2.5 的 config schema 中模型限制字段是 `"limit": {"context": N, "input": N, "output": N}`；`maxInputTokens/maxOutputTokens` 是 v1 风格字段，**被静默忽略不报错**。对网关模型无感（服务端不严格校验），对 max_model_len 严格的 vLLM 才暴露。
+- **修复**：模型条目改用 `"limit": {"context": 8192, "output": 4096}`。判别法：看 `opencode.ai/config.json` schema（`$defs/Config.ModelEncoded/properties/limit`）。
+- **附带发现**：opencode 官方 install 脚本（curl opencode.ai/install）在该容器内卡死无输出；直接从宿主机 npm 包拷原生二进制（`@opencode/cli/bin/opencode.exe`，aarch64 ELF，248M）到 `/usr/local/bin` 即可，openai-compatible provider **已内置二进制**，无需 node/npm、无需运行时联网（断网模拟验证通过）。
+
+### E-8｜容器内 opencode 与宿主机 opencode 撞服务端口 49374（2026-11-11，deepeyes-v2）
+
+- **现象**：`docker run --net=host` 的容器里跑 `opencode run` 报 `Managed service port 49374 on 127.0.0.1 is already in use`。
+- **根因**：宿主机自己也跑着 opencode（默认服务端口 49374），host 网络模式下端口共享直接冲突。
+- **修复**：容器内 `opencode service set port 49555`（配置落盘 `~/.config/opencode/service.json`，已烘焙进 v2 镜像）。离线镜像若再撞，同命令换端口。
+- **附带**：judge 服务（142:18901）有 `max_new_tokens=64` 打分优化上限——做 opencode 问答连通性没问题，但 **agent 工具调用会静默无输出**（64 token 发不完 tool_call XML）。这不是 bug，是打分部署形态；离线 Qwen3.5-9B 服务（`/opt/scripts/serve_qwen35_9b.sh`）无此限制。
+
 ### E-7｜142 冒烟启动两类陷阱：docker exec -d 静默失败 + batch 整除断言（2026-11-11，142 迁移）
 
 - **坑 1：`docker exec -d` 跑长启动命令偶发静默失败**——命令"发出去了"但容器内什么都没起（日志文件都不创建），138/142 都复现过。**修复**：改写成 `docker exec -d <c> bash -c '... nohup ... > log 2>&1 &'` 形式，或落盘成脚本再 exec；启动后必须回查日志文件/进程存在。

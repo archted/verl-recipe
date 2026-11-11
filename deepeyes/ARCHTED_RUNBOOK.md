@@ -47,6 +47,25 @@
 
 接手要点：正式 run 的结果看 `deepeyes_run_v1/logs/v1_full/`（容器 `/workspace/logs/v1_full/`），tensorboard 同目录；watchdog 报警看 `deepeyes_run_v1/logs/watchdog_alert.log`（无内容=正常）；恢复训练直接容器内 `SMOKE=0 bash /workspace/scripts/run_full_v1.sh`。
 
+### deepeyes-v2 离线版镜像：opencode + 本地 Qwen3.5-9B（11-11 完成 ✅）
+
+为"完全离线环境用 opencode + 本地 Qwen3.5-9B 服务"制作 `deepeyes-train-infer:v2`（42.7G，基于 v1 + 追加层，**v1 与 deepeyes-v1 容器全程未动**）：
+
+| 项 | 内容 |
+|---|---|
+| 验证容器 | `deepeyes-v2`（--net=host、无 NPU 挂载、纯网络验证，验证完删除） |
+| opencode | v2.2.5 原生二进制 `/usr/local/bin/opencode`（从宿主机 npm 包拷贝，aarch64；**openai-compatible provider 内置，无需运行时 npm/联网**，已做断网模拟验证） |
+| 三 provider | `gateway/*`（火山云网关 11 模型，复刻宿主机配置）/ `judge/judge`（142:18901 本地 judge）/ `qwen-local/qwen3.5-9b`（127.0.0.1:18900 离线用） |
+| 双通道验证 | judge 问答 ✅、gateway glm-5.3-flash 问答 ✅ + bash 工具调用真实执行 ✅（均在**commit 后的镜像**里用一次性容器复验） |
+| 烘焙物 | Qwen3.5-9B 19G（/opt/models）、`/opt/scripts/serve_qwen35_9b.sh`（TP 可参数化、qwen3_xml 工具链、E-4/E-6 防护已内置）、`/opt/README_OFFLINE.md`（离线部署全流程） |
+| 离线交付 | `/home/h00516332/deepeyes-train-infer-v2.tar.gz`（docker save\|gzip） |
+
+**踩坑记录**（详见 TROUBLESHOOTING E-8/E-9）：① 容器与宿主机 opencode 撞服务端口 49374（--net=host 所致）→ 镜像内固定 49555；② v2.2.5 模型 token 上限字段是 `limit:{context,output}`，v1 风格 `maxOutputTokens` 被静默忽略（judge max_model_len=8192 严格校验才暴露）；③ judge 服务 `max_new_tokens=64` 打分优化限制导致其做不了 agent 工具调用（连通性无碍，离线 Qwen 服务无此限制）；④ opencode 官方 install 脚本在容器内卡死，直接拷宿主机二进制解决。
+
+**judge 的 opencode 模型名**：`judge/judge`（"本地judge模型服务"=142 的 vLLM judge，OpenAI 兼容）。
+
+---
+
 ### 142 迁移 + 新镜像 e2e 全链路验证（11-11 09:10 CST 完成 ✅）
 
 142 已从旧容器 `deepeyes`（judge 独占 8 卡）整体切换到与 138 相同的新镜像 `deepeyes-train-infer:v1` + 新容器 `deepeyes-v1`，端到端验证全绿：
