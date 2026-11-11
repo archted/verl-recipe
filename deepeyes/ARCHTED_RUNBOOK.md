@@ -47,6 +47,24 @@
 
 接手要点：正式 run 的结果看 `deepeyes_run_v1/logs/v1_full/`（容器 `/workspace/logs/v1_full/`），tensorboard 同目录；watchdog 报警看 `deepeyes_run_v1/logs/watchdog_alert.log`（无内容=正常）；恢复训练直接容器内 `SMOKE=0 bash /workspace/scripts/run_full_v1.sh`。
 
+### 142 迁移 + 新镜像 e2e 全链路验证（11-11 09:10 CST 完成 ✅）
+
+142 已从旧容器 `deepeyes`（judge 独占 8 卡）整体切换到与 138 相同的新镜像 `deepeyes-train-infer:v1` + 新容器 `deepeyes-v1`，端到端验证全绿：
+
+| 项目 | 结果 | 证据 |
+|------|------|------|
+| 镜像迁移 | ✅ | `docker save\|gzip` 8.2G → rsync → 142 `docker load`，ID 一致 `3a91b482054b` |
+| 目录迁移 | ✅ | `deepeyes_run_v1/` rsync（排除 ckpts/ray_tmp/logs）；Qwen3.5-9B 用 `cp -al` 硬链接复用 142 已有副本（省 19G）；eval_smoke_v1 单独传（root 属主文件先 `sudo chmod -R a+rX`） |
+| 新容器 | ✅ | `deepeyes-v1`：--net=host、8 卡、judge 30B 只读挂载自 `/home/h00516332/deepeyes_run/models/`（root 属主，容器内可读） |
+| judge 切换 | ✅ | 旧容器 stop → 新容器 TP=2（卡 6/7，脚本 `serve_judge_142.sh`，TP 可参数化）；停机窗 ~9min（07:46-07:55），138 零 judge 报错；`/v1/models` 200 + 质量探针 CORRECT |
+| 训练冒烟 | ✅ | 4 卡（0-3）`SMOKE=1 NDEVICES_PER_NODE=4` 1 step：score 0.662（min -0.2/max 2.0 = acc+tool 双满 → judge 打分链路通）、num_turns 3.5-4.1、ckpt global_step_1 落盘、零报错 |
+| ckpt 合并 | ✅ | `verl.model_merger merge` → `/workspace/models/eval_smoke_v1_142/`（exit=134 glibc abort 无害） |
+| 推理评测 | ✅ | eval 服务 TP=2（卡 4/5，端口 18900）+ eval_agent --limit 8：**acc 100%**、tool_call_rate 100%、工具成功率 100%、format 零错误（与 138 侧 acc 100% 同量级） |
+
+**142 当前形态**：judge TP=2 跑在 deepeyes-v1 卡 6/7（138 训练打分已验证 3+ 个打分周期正常）；卡 0-5 空闲可训练/评测。**遗留动作：恢复 judge TP=8**（`TP=8 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash /workspace/scripts/serve_judge_142.sh`），必须在 138 打分刚完成后的 ~40min 安全窗内操作（看 watchdog 最新 score 时间戳）。
+
+**142 侧坑位**：① 卡 0-3 有 ~3.4G 驱动级残留 HBM（进程退出后不释放），起大服务若报 `Alloc Stream resource failed: Too many streams`，换干净卡（见 TROUBLESHOOTING E-6）；② batch 64 必须被 NDEVICES_PER_NODE 整除（6 卡不行、4/8 行）；③ `docker exec -d` 长命令偶发静默失败，改 `nohup ... &` 写法。
+
 ---
 
 ## 0. Quickstart（最快上手路径）
@@ -371,9 +389,17 @@ python3 recipe/deepeyes/scripts/prefilter_deepeyes.py   # 生成 *.filtered_8192
 
 ### 5.3 judge 部署（需要一台空闲卡的机器）
 
-142 当前 judge：Qwen3-30B-A3B-Instruct-2507、TP=8、`--max-model-len 8192`、
-`--override-generation-config '{"max_new_tokens": 64}'`、端口 18901、`--served-model-name judge`。
-重建命令按 142 容器内 `ps` 或 `/workspace` 下的启动脚本还原。训练侧只需：
+**142 judge 现跑在新容器 `deepeyes-v1`（2026-11-11 起迁移）**：Qwen3-30B-A3B-Instruct-2507
+（宿主机 `/home/h00516332/deepeyes_run/models/`，root 属主，容器内只读挂载）、
+`--max-model-len 8192`、`--override-generation-config '{"max_new_tokens": 64}'`、
+端口 18901、`--served-model-name judge`、带 `--enable-auto-tool-choice --tool-call-parser qwen3_xml`。
+
+启动脚本：容器内 `/workspace/scripts/serve_judge_142.sh`（源在 138 `deepeyes_run_v1/scripts/`），TP 可参数化：
+- 独占形态：`TP=8 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash .../serve_judge_142.sh`
+- 与训练/评测共存：`TP=2 ASCEND_RT_VISIBLE_DEVICES=6,7 bash .../serve_judge_142.sh`
+
+切换 judge 必须避开 138 打分窗：看 138 `deepeyes_run_v1/logs/watchdog.log` 最新 score 时间戳，
+打分刚完成后有 ~40min 安全窗。打分失败会**静默把该步 acc 记 0**（`_judge_accuracy` 吞异常），污染是有界但真实的。训练侧只需：
 
 ```bash
 export LLM_AS_A_JUDGE_BASE=http://71.10.29.142:18901/v1

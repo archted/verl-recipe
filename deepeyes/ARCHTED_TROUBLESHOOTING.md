@@ -47,6 +47,20 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-7｜142 冒烟启动两类陷阱：docker exec -d 静默失败 + batch 整除断言（2026-11-11，142 迁移）
+
+- **坑 1：`docker exec -d` 跑长启动命令偶发静默失败**——命令"发出去了"但容器内什么都没起（日志文件都不创建），138/142 都复现过。**修复**：改写成 `docker exec -d <c> bash -c '... nohup ... > log 2>&1 &'` 形式，或落盘成脚本再 exec；启动后必须回查日志文件/进程存在。
+- **坑 2：`AssertionError: real_train_batch_size (64) must be divisible by minimal possible batch size (N)`**——batch 64（8×8）必须被 `NDEVICES_PER_NODE` 整除：6 卡 ❌、4 卡 ✅、8 卡 ✅。142 与 judge 共存时用 4 卡（0-3）冒烟即可。
+- **教训**：142 侧冒烟必须设 `NDEVICES_PER_NODE=4`（新脚本已支持 `${NDEVICES_PER_NODE:-8}` 覆盖）。
+
+### E-6｜142 起独立 vLLM 服务报 "Alloc Stream resource failed: Too many streams are created"（2026-11-11，142 eval 服务）
+
+- **现象**：142 新容器内起 eval 服务（eval_smoke_v1_142，TP=2）连续两次失败：第一次在 NPUGraph capture 29/35 时报 `rtStreamWaitEvent ... resource alloc fail`，第二次（修了 AOT + enforce-eager 后）仍在 Worker 初始化阶段报 `Alloc Stream resource failed. Reason: Too many streams are created`。
+- **根因**：卡 0-3 刚跑完训练冒烟，进程退出后**驱动级资源没放干净**（每卡残留 ~3.4G 无主 HBM + 流表脏），新进程在这几张卡上分配流资源直接失败。与显存余量无关（57G 空闲照样挂）。
+- **修复**：**换干净卡**（卡 4/5 从未被冒烟占用）秒通。脚本同时补了两个防护：`export VLLM_USE_AOT_COMPILE=0`（E-4 同源，ray 外裸起服务也必须关）+ `--enforce-eager`（judge 同款，绕开 capture 路径）。已改进 `serve_eval_model.sh`。
+- **判别法**：`npu-smi info` 里某卡有占用但 Process 表查不到对应进程 = 驱动级残留，该卡暂视为"脏卡"绕开；容器整体重启/服务全停重启后可复用。
+- **注意**：恢复 judge TP=8 时会用回卡 0-3，若同样报 Too many streams，先 docker restart deepeyes-v1 再起（需重新评估打分窗）。
+
 ### E-5｜推理评测 400 "auto tool choice" + 工具调用解析不到（2026-11-10，推理链路验证）
 
 - **现象①**：`/v1/chat/completions` 带 `tools` 参数即 400：`"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser`。
