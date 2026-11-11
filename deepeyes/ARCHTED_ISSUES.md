@@ -72,6 +72,12 @@
 | `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2 | 无（代码证据） | ✅ 待提交 |
 | `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 无（文档比对） | ✅ 待提交 |
 
+> **2026-11-12 重生成（修中文乱码）**：4 份 docx 打开时中文乱码，根因是 `gen_dts.py` 只设了
+> Calibri（python-docx 的 `font.name` 只写 `w:ascii/w:hAnsi`），theme 的东亚字体（`<a:ea>`）又是
+> 空串 → 中文 run 无字体可解析。已在 `save_doc()` 里给所有 run 与样式显式补 `w:eastAsia="宋体"`
+> 并重新生成（内容一字未动，逐 run 校验 0 个含中文 run 缺字体声明，DTS-001 三张图完好）。
+> 后续再用 `gen_dts.py` 生成新单自带此修复。
+
 （截图独立文件 1_score.png / 3_grad_norm.png / 4_kl.png 也在 pr_issue/ 备份，DTS 系统若需单独传图可直接取用。）
 
 > 模板：`| 日期 | 渠道 | 编号/链接 | 内容 | 状态 |`
