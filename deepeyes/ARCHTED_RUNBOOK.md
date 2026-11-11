@@ -242,6 +242,7 @@ scp 同步）。
 | `deepeyes_run/data/deepeyes/` | `/workspace/data/deepeyes/` | 预过滤数据 train/val.filtered_8192.parquet（33137/256 条） |
 | `deepeyes_run/models/` | `/workspace/models/` | Qwen3.5-9B 原始模型 + **eval_qwen35_9b_step170（已导出的评测模型）** |
 | `deepeyes_run/eval_prep/` | `/workspace/eval_prep/` | **我的评测工程**（脚本/结果/报告） |
+| `deepeyes_run/ppt/` | —（仅 138 宿主机） | 汇报 PPT：`DeepEyes_agentic_RL_on_verl.pptx`（2 页：适配原理+流程图 / 工作量盘点）+ 生成脚本 `make_adapt_ppt.py`（python-pptx，改动内容后重跑即可再生成） |
 | `deepeyes_run/conda/` | `/workspace/conda/` | conda env（`/workspace/conda/verl/bin/python`，Python 3.12） |
 
 ### 2.3 git 仓库（都是我的 fork）
