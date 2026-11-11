@@ -496,7 +496,7 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 - [ ] 阶段结束后：撤销 GitHub token、删除 `/home/h00516332/atd/.git-credentials`（公共机器安全）
 - [x] **P0**：修 `tool_config_path` 默认接线（yaml + `run_deepeyes_grpo_qwen3_5.sh` 指向 rel 配置），见 §11.4 / TROUBLESHOOTING E-11 —— ✅ 2026-11-11 已改（下次启动生效）
 - [ ] **P0**：val 换成纯 vstar 子集（≥1000 条），train 增加 vstar-only 开关，见 §11.4 —— 🟡 开关已加（`--vstar-only`），数据待下一轮重新生成
-- [x] **P1**：judge 请求截断 + 400 计数，见 TROUBLESHOOTING E-10 —— ✅ 2026-11-11 已改（截断 + `max_tokens=16` + 失败计数进日志；未进 `reward_extra_info`）
+- [x] **P1**：judge 400，见 TROUBLESHOOTING E-10 —— ✅ 2026-11-11 已改（0 分判定提前到 judge 调用之前 + 失败日志带 response body；截断方案已推翻删除；judge `max_model_len` 32768 待下次重启生效）
 
 ---
 
@@ -515,7 +515,7 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 
 逐条判定合计：**✅ 38 项、⚠️ 30 项、❗ 17 项、❓ 3 项**（❗ 归并为 §11.3 的 12 条差异，其中 P0 2 条、P1 3 条）。
 
-**后续动作（2026-11-11）：P0-1（工具接线）、P1-4（judge 截断）已修，P0-2（数据单源）已备开关** —— 详见 §11.7。所有改动都是源码级，**下次启动才生效，当前 run 不受影响**。
+**后续动作（2026-11-11）：P0-1（工具接线）、P1-4（judge 400 —— 实为调用顺序，不是上下文容量）已修，P0-2（数据单源）已备开关** —— 详见 §11.7。所有改动都是源码级，**下次启动才生效，当前 run 不受影响**。
 
 ### 11.2 逐章节对照
 
@@ -702,7 +702,7 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 **P1 — 让"和案例比"这件事失去意义，或持续注入奖励噪声**
 
 3. **val 口径**：256 条混源 vs 案例 1118 条单源 → 不能用 0.70–0.78 判定成败。
-4. **judge 400（已观测 85 次）**：`acc` 静默记 0（E-10）。**✅ 已修（2026-11-11）**：`_judge_accuracy` 在拼接前截断（question 1000 / GT 1000 / answer 保留尾部 2000 字符，`<answer>` 在尾部所以不丢），请求带 `max_tokens=16`，失败次数进日志 `(total N)`；容器内 monkeypatch 实测 prompt 从 ~19000 字符降到 4539 字符、尾部 `Final answer is left.` 保留。judge `max_model_len` 仍是 8192，截断后已够用，暂不重启 judge。
+4. **judge 400（已观测 87 次）**：`acc` 静默记 0（E-10）。**✅ 已修（2026-11-11，二次定因）**：这 87 次全部来自**格式错误**的 rollout —— 缺 `<answer>` 时 `answer_text` 回退成整条响应尾巴（可达 1.6 万 token），而 `compute_score` 本来就对 `answer_text >= 1000` 字符直接判 0 分，judge 的结论从不影响奖励。真缺陷是**调用顺序**（先问 judge、后判 0 分），不只是上下文。已把长度判定提到 judge 之前 → 400 归零、奖励数值不变；顺带删掉上一版加的截断（GT 最长 1884 字符，截到 1000 会造假阴性）。实测合法输入最坏 1760 token vs 8176 预算。judge `max_model_len` 8192→32768 已写进 serve 脚本（下次重启生效，当前无收益不重启）。
 5. **训练参数成体系偏离**：`use_kl_loss`、`torch_compile`、offload 全开、16384 响应、TP=2、micro-batch=1、test_freq=80 → 曲线形态/耗时/稳定边界都与案例不同，不能拿案例阈值当验收线。
 
 **P2 — 一致性/健壮性问题，记录在案**
@@ -736,8 +736,7 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 2. **数据（半天）**：`prepare_data.py` 加 `--vstar-only`，train = vstar 22184，val = 从 vstar 里切 ≥1118 条（`test_ratio=0.05`），与案例口径对齐；thinklite 若要保留，作为单独实验并单独统计。
    → **开关已加**；生成命令（先换输出目录，别覆盖正在用的数据）：
    `python3 recipe/deepeyes/scripts/prepare_data.py --vstar-only --val-size 1118 --output-dir ~/data/deepeyes_vstar`
-3. **judge（1 小时）**：`answer_text` 截断（保留尾部）+ 请求带 `max_tokens=16` + judge `max_model_len` 提到 16384 + 400 计数进 `reward_extra_info`（E-10）。
-   → **截断 + `max_tokens` + 失败计数已落地**；`max_model_len` 仍 8192（截断后够用），400 计数目前只进日志，未进 `reward_extra_info`。
+3. **judge（已完成，2026-11-11）**：`answer_text >= 1000` 的 0 分判定提到 judge 调用之前（400 归零、奖励不变）；失败日志补 vLLM response body + prompt 字符数；`serve_judge_142.sh` 的 `max_model_len` 8192→32768（下次重启生效）。
 4. **参数对齐（下一轮 run 前决策）**：先把 `max_response_length` 降到 8192、`test_freq` 降到 10，其余（KL、offload、torch_compile、TP）保持现状但在 Wiki 里明确"与案例不可比"，避免误读。
 5. **可选**：补 `disable_mm_preprocessor_cache=True`；把工具换成 ThreadMode 池（若 profiling 显示 tool 阶段是瓶颈）。
 
@@ -765,23 +764,26 @@ grep -c "Unknown function\|Missing required 'image'\|Skipping malformed" /home/h
 
 ### 11.7 本轮已落地的修复（2026-11-11）
 
-原则：**只改代码，不动正在运行的训练**。源码改动要下次启动才生效，当前 run 继续用内存里的旧代码，日志/ckpt 不受任何影响。
+原则：**只改代码，不动正在运行的训练**。源码改动要下次启动才生效，当前 run 继续用内存里的旧代码，日志/ckpt 不受影响。
 
 | # | 改动 | 文件（配方仓 + 运行副本，两份同步） | 生效时机 |
 | --- | --- | --- | --- |
 | 1 | 默认工具配置改相对坐标工具：`image_zoom_in_tool_config.yaml` → `image_zoom_in_rel_tool_config.yaml` | `configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36`、`run_deepeyes_grpo_qwen3_5.sh:165` | 下次启动 |
-| 2 | judge prompt 截断：question 1000 / GT 1000 字符（保留头部）+ answer 2000 字符（**保留尾部**，`<answer>` 在尾部）；请求加 `max_tokens=16`；失败计数进日志 `(total N)` | `deepeyes.py`（`_JUDGE_MAX_*` 常量 + `_judge_accuracy` 入口 + payload） | 下次启动 |
-| 3 | `prepare_data.py --vstar-only`：按 `data_source == "vstar"` 过滤，给"数据单源"留一条命令的开关（本轮不重生成数据） | `scripts/prepare_data.py` | 手动执行时 |
+| 2 | **judge 调用顺序**：`len(answer_text) >= 1000` 的 0 分判定移到 `_judge_accuracy` 之前；删掉上一版的 question/GT/answer 截断；失败日志补 response body + `prompt_chars` + 失败计数 | `deepeyes.py::compute_score`、`::_judge_accuracy` | 下次启动 |
+| 3 | judge 部署 `max_model_len` 8192 → 32768（`MAX_MODEL_LEN` 可覆盖）；依据是启动日志实测 KV cache 2,049,536 token | `scripts/serve_judge_142.sh:23`（138/142 各一份） | 下次 judge 重启（当前刻意不重启） |
+| 4 | `prepare_data.py --vstar-only`：按 `data_source == "vstar"` 过滤，给"数据单源"留一条命令的开关（本轮不重生成数据） | `scripts/prepare_data.py` | 手动执行时 |
 
-验证记录：
+验证记录（容器内真跑，非纸面推演）：
 
 - 两份 `deepeyes.py` 逐字节一致；`py_compile` 通过。
-- 容器内 monkeypatch `_post_judge` 实测（v1 环境，`datasets 5.1.0`）：超长 question(5000)/GT(2000)/answer(12000) 输入下 **prompt 4539 字符**（原 ~19000），尾部 `Final answer is left.` 保留，`max_tokens=16` 生效。
-- `prepare_data.py --help` 正常；`Dataset.filter(input_columns=...)` 在容器内 datasets 5.1.0 上实测可用。
+- `_test_judge_order.py` 4 个用例全过：无 `<answer>` 的 5000 字符尾巴 → judge **0 次调用**、acc 0、format -1；短答案 → judge 1 次、acc 1;1200 字符答案 → judge **0 次**、acc 0、format -1；judge 返回 400 → 不崩、日志含 `body='{"error":{"message":"maximum context length is 8192 tokens"…}}'` 与 `prompt_chars`、`_JUDGE_FAILURES=1`。
+- 用 judge 自己的 tokenizer 实测合法输入分布：最长 question+GT 394 token + few-shot 751 + 999 字符答案 615 = **1760 token**，8176 预算的 4.6 倍余量 → 合法流量根本碰不到 8192。
+- `prepare_data.py --help` 正常；`Dataset.filter(input_columns=...)` 在 datasets 5.1.0 实测可用。
+
+**推翻的判断（留档，避免重犯）**：上一版把 400 归因为"judge 上下文太小 + 答对的长答案被记 0"，并加了 question/GT/answer 截断。二次定因证明：① 那些 400 的样本**本来就被 `answer_text >= 1000` 判 0 分**，judge 结论不影响奖励；② 合法输入只有 1760 token；③ 截断 GT 反而可能把 CORRECT 判成 INCORRECT。所以截断已删除，改为"不做无效调用"。
 
 **未做（有意）**：
 
 - 不重生成数据集（当前 run 进行中，换数据本轮不生效；要换时按 §11.5 第 2 条命令跑）。
-- 不改 judge `max_model_len`（截断后 8192 够用，避免再次打断 judge 服务）。
+- 不在训练期间重启 judge（虽然 32768 已进脚本）：对现数据零收益，只会白赚 3–4 分钟 judge 停机，而那段时间的 judge 调用会全部记 0。
 - 不动训练参数（KL / offload / torch_compile / TP / micro-batch / test_freq），这些只影响"与案例可比性"，不影响正确性，留待下一轮 run 前决策。
-

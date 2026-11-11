@@ -59,23 +59,38 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 - **自检**：跑 1 步后 `grep -c "Unknown function\|Missing required 'image'" <log>` 必须为 0。
 - **状态**：✅ **已修（2026-11-11）**。`configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36` 与 `run_deepeyes_grpo_qwen3_5.sh:165` 默认值已改为 `image_zoom_in_rel_tool_config.yaml`；rel 配置的 schema `name` = `image_zoom_in_rel_tool` = `deepeyes.py:34` 的 `TOOL_NAME` = 数据集 `tools_kwargs` 键，三者一致。下次启动生效（当前 run 由 `run_full_v1.sh` 覆盖，行为不变）。
 
-### E-10｜judge 返回 400（prompt 超 max_model_len）→ 答对样本被静默记 0 分（2026-11-11，案例一致性审计）
+### E-10｜judge 返回 400（prompt 超 max_model_len）→ 每次都是"奖励已定型"的无效调用（2026-11-11，案例一致性审计 + 二次定因）
 
-- **现象**：训练日志出现 `Chat completion request failed: 400 Client Error: Bad Request for url: http://71.10.29.142:18901/v1/chat/completions`，本 run 截至 step 30 共 **85 次**（约 0.5% rollout）。对应样本 `acc_reward` 直接为 0，无任何显式告警统计。
-- **根因**：`deepeyes.py::_judge_accuracy` 把 `question + ground_truth + answer_text` 原样拼进 judge prompt，**不截断、不设 `max_tokens`**；judge 服务 `max_model_len=8192`。多轮 rollout 的 `answer_text` 可达数千 token（尤其 16384 响应长度下），拼上 system + few-shot 示例后超 8192 → vLLM 返回 400。`_post_judge` 的 3 次重试都是同一个超长 payload，必然全失败。
-- **影响**：不是崩溃，是**奖励噪声**——恰好答对的长答案被记 0，等价于给模型一个错误负样本。
-- **修复方向**（下次 run 生效，勿动当前 run）：
-  1. 截断 `answer_text`（如保留尾部 2000 字符，尾部才是最终 `<answer>`），或对 `ground_truth`/`question` 也加上限；
-  2. judge 请求显式带 `max_tokens: 16`（判定只需一个词），并把 judge `max_model_len` 提到 16384；
-  3. 加一个计数器：400 次数 / 总 judge 调用数，打到 `reward_extra_info` 里，便于早期发现。
-- **验证**：改完后 `grep -c "Chat completion request failed" <log>` 应为 0，且 `answer_length` 分布不再触顶。
-- **状态**：✅ **已修（2026-11-11）**，第 1、2 项已落地、第 3 项只做了一半：
-  - `deepeyes.py` 新增 `_JUDGE_MAX_QUESTION_CHARS=1000` / `_JUDGE_MAX_GT_CHARS=1000` / `_JUDGE_MAX_ANSWER_CHARS=2000`（answer 取**尾部**），在 `_judge_accuracy` 入口处截断；
-  - payload 增加 `"max_tokens": 16`；
-  - 失败日志改为 `Chat completion request failed: {e} (total N)`，`N` 为进程内累计失败数（方便直接 grep 计数）。
-  - 容器内 monkeypatch 实测：question 5000 / GT 2000 / answer 12000 字符输入 → prompt **4539 字符**（原 ~19000），尾部 `Final answer is left.` 保留。
-  - judge `max_model_len` 仍为 8192（截断后够用，不重启服务）；失败计数尚未写入 `reward_extra_info`。
-  - 下次启动生效；当前 run 继续用旧代码，本轮 400 仍会出现，属预期。
+- **现象**：训练日志出现 `Chat completion request failed: 400 Client Error: Bad Request for url: http://71.10.29.142:18901/v1/chat/completions`，本 run 截至 step 32 共 **87 次**（≈2048 个 rollout 的 4%）。
+
+**第一次判断（错，已推翻）**："judge 部署的 `max_model_len=8192` 太小，答对的长答案被判 0"。据此做了 prompt 截断（question/GT/answer）。**这是治表象**：截断 GT 反而可能把 CORRECT 判成 INCORRECT（训练集 GT 最长 1884 字符，被截到 1000）。
+
+**二次定因（有数字）**：
+
+1. `answer_text` 不是整条 rollout：`compute_score` 先从 `<answer>…</answer>` 里抽（`deepeyes.py:252`），只有**没有 `<answer>`**（格式错误）时才回退成"最后一个 `</tool_response>` 之后的全部内容"或整条响应（`:256-270`）—— 长度受 `max_response_length=16384` 约束。
+2. 用 judge 自己的 tokenizer（Qwen3-30B-A3B）实测**合法输入**：
+   - 全训练集最长的 question+GT（116 + 1884 字符）= 394 token；
+   - few-shot + system ≈ 751 token；
+   - 999 字符中文答案（= 长度上限，见第 3 点）= 615 token；
+   - **合法最坏情况合计 1760 token，距 8176 预算有 4.6 倍余量。**
+3. `compute_score:280` 规定 `len(answer_text) >= 1000` 直接 `acc=0`（反 judge hack 规则）。所以能超 8176 token 的请求必然 `answer_text` > 1.3 万字符 —— 只可能来自第 1 条的回退分支，而那条分支**已经被判 0 分**，judge 的结论无论如何都不影响奖励。
+4. 结论：**judge 上下文不是瓶颈**（vLLM 启动日志实测 KV cache 可容 2,049,536 token，8192 只用了 0.4%）。真正的缺陷是**调用顺序**：先花一次 judge 调用，再判断"这个答案按规则已经是 0 分"。
+5. 副因（可诊断性）：`requests` 的 `HTTPError.__str__` 只有状态码，日志里看不到 vLLM 返回的 reason（"maximum context length is 8192 tokens…"），所以第一次只能靠猜。
+
+- **影响**：不改变奖励（那 4% 本来就 acc=0 + format=-1），但每次白烧一次 judge 调用（含 1.6 万 token 的 prefill），并**污染日志、掩盖真正的信号**——4% 的 rollout 是格式错误（缺 `<answer>` / 标签不配对），这才是该盯的指标。
+- **修复（2026-11-11，已落地）**：
+  1. **把长度判定提到 judge 调用之前**：`len(answer_text) >= 1000` → `acc=0, format=-1`，不再调用 judge。400 归零、judge 负载降 ~4%，奖励数值完全不变。
+  2. **删掉截断**（question/GT/answer 全部按原样送判），避免 GT 被截导致的假阴性。
+  3. 失败日志补上 vLLM 的响应体与 prompt 字符数：`... failed: 400 ... body='{"error":{"message":"maximum context length is 8192 tokens"…}}' (prompt_chars=N, total K)`。
+  4. judge 部署 `max_model_len` 8192 → 32768（`MAX_MODEL_LEN` 环境变量可覆盖）。这不是本次 400 的成因，但 8192 本就是抄来的默认值（KV 实测可容 200 万 token），提高它给未来长 GT 数据留余量；**脚本已改，下次 judge 重启生效**（当前不重启：对现数据零收益，白赚 3–4 分钟停机）。
+- **验证**：容器内 4 个用例（`_test_judge_order.py`）：
+  | 用例 | 结果 |
+  | --- | --- |
+  | 无 `<answer>`、5000 字符尾巴 | judge 调用 **0 次**，acc 0，format -1 |
+  | 短答案 `<answer>yes</answer>` | judge 调用 1 次，acc 1 |
+  | 1200 字符答案 | judge 调用 **0 次**，acc 0，format -1 |
+  | judge 返回 400 | 不崩，日志含 `body=…` 与 `prompt_chars`，`_JUDGE_FAILURES=1` |
+- **教训**：`grep -c` 出的错误条数是"症状计数"，不是"根因定位"。先量出**合法输入的分布**（这里 1760 vs 8176），再判断是"容量不够"还是"输入不该发"。容量类问题看 KV cache 实测值，不看配置默认值。
 
 ### E-9｜opencode 自定义模型 token 上限字段：v2 用 limit，v1 风格 maxOutputTokens 被静默忽略（2026-11-11，容器内 opencode + judge）
 

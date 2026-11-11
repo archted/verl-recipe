@@ -168,13 +168,8 @@ _JUDGE_NEXT_PROBE = 0.0
 _JUDGE_TEMPLATE_KWARGS = True
 _JUDGE_PROBE_INTERVAL = 60.0
 
-# The judge server runs with a small context window (8192 tokens). Long rollouts
-# used to overrun it and get HTTP 400, which silently scored the sample 0. Cap
-# the variable parts of the prompt; keep the TAIL of the model answer because
-# the final ``<answer>`` block lives there.
-_JUDGE_MAX_ANSWER_CHARS = 2000
-_JUDGE_MAX_GT_CHARS = 1000
-_JUDGE_MAX_QUESTION_CHARS = 1000
+# Counts judge calls that never returned a verdict; a non-zero value in the log
+# means the reward silently degraded to 0 (see the (total N) suffix below).
 _JUDGE_FAILURES = 0
 
 
@@ -273,13 +268,18 @@ def compute_score(
         is_format_error = True
         answer_text = solution_str.strip()
 
-    # Accuracy: LLM judge, strict semantic equivalence with the ground truth.
-    acc_reward = _judge_accuracy(extra_info.get("question", ""), ground_truth, answer_text)
-
-    # Penalise excessively long answers (potential judge hacking).
+    # An answer of >= 1000 chars is scored 0 by definition (anti judge-hacking
+    # rule), so do not spend a judge call on it. The order matters: when the
+    # model omits <answer>, answer_text falls back to "everything after the last
+    # tool response", i.e. up to the full 16k-token rollout. Those prompts used
+    # to overrun the judge context and log one HTTP 400 per malformed rollout,
+    # even though the verdict could never change the reward.
     if len(answer_text) >= 1000:
         acc_reward = 0.0
         is_format_error = True
+    else:
+        # Accuracy: LLM judge, strict semantic equivalence with the ground truth.
+        acc_reward = _judge_accuracy(extra_info.get("question", ""), ground_truth, answer_text)
 
     # Tool usage: works for both the JSON (Qwen2.5-VL) and XML (Qwen3.5)
     # <tool_call> formats.
@@ -332,11 +332,6 @@ def _judge_accuracy(question_text: str, ground_truth: str, answer_text: str) -> 
     base_url, model_name = _get_judge()
     if not base_url or not model_name:
         return 0.0
-
-    # Keep the judge prompt inside the server context (see _JUDGE_MAX_* above).
-    question_text = (question_text or "")[: _JUDGE_MAX_QUESTION_CHARS]
-    ground_truth = (ground_truth or "")[: _JUDGE_MAX_GT_CHARS]
-    answer_text = (answer_text or "")[-_JUDGE_MAX_ANSWER_CHARS :]
 
     system_prompt = (
         "You are an expert evaluator. Your task is to determine if a model's answer is semantically equivalent to a "
@@ -393,7 +388,15 @@ def _judge_accuracy(question_text: str, ground_truth: str, answer_text: str) -> 
         except Exception as e:
             if attempt == 2:
                 _JUDGE_FAILURES += 1
-                logger.warning(f"Chat completion request failed: {e} (total {_JUDGE_FAILURES})")
+                body = ""
+                detail = getattr(e, "response", None)
+                if detail is not None and getattr(detail, "text", ""):
+                    body = f" body={detail.text[:200]!r}"
+                logger.warning(
+                    f"Chat completion request failed: {e}{body} "
+                    f"(prompt_chars={len(question_text) + len(ground_truth) + len(answer_text)}, "
+                    f"total {_JUDGE_FAILURES})"
+                )
                 return 0.0
             time.sleep(1.0 + attempt)
 
