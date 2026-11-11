@@ -4,6 +4,7 @@
 > **本手册自包含**：不需要再看同事的 RUNBOOK / TROUBLESHOOTING / 案例文档即可开展工作。
 > 问题记录见姊妹篇 `ARCHTED_TROUBLESHOOTING.md`（同目录）；给他人复现用的案例手册见
 > `ARCHTED_CASE.md`（主线=一体镜像）+ `ARCHTED_CASE_newbuild.md`（从零搭建存档）。
+> **与参考案例文档的逐章一致性审计见 §11**（2026-11-11，含 P0/P1 待修项）。
 
 ---
 
@@ -493,3 +494,267 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 - [ ] judge prompt 超长问题修复（`_judge_accuracy` 截断 answer_text 或 judge max_model_len↑，TROUBLESHOOTING D-1）
 - [ ] 与主管确认训练完成后的目标（评测报告交付？继续迭代？业务数据？）
 - [ ] 阶段结束后：撤销 GitHub token、删除 `/home/h00516332/atd/.git-credentials`（公共机器安全）
+- [ ] **P0**：修 `tool_config_path` 默认接线（yaml + `run_deepeyes_grpo_qwen3_5.sh` 指向 rel 配置），见 §11.4 / TROUBLESHOOTING E-11
+- [ ] **P0**：val 换成纯 vstar 子集（≥1000 条），train 增加 vstar-only 开关，见 §11.4
+- [ ] **P1**：judge 请求截断 + 400 计数，见 TROUBLESHOOTING E-10
+
+---
+
+## 11. 案例一致性审计：案例文档 vs 当前 v1 实现（2026-11-11）
+
+> 基准：`/home/h00516332/atd/verl_project/基于昇腾和VeRL的多模态智能体强化学习.md`（1302 行，2026-07-21 发布，**经过验证**）。
+> 对象：本机 v1 镜像代码（宿主 `/home/h00516332/deepeyes_run_v1/verl`＝容器 `/workspace/verl`；配方仓 `/home/h00516332/atd/verl_project/verl-recipe/yuki/deepeyes`）。
+> 方法：按案例章节从前到后逐节比对，每个结论都标注证据文件:行。判定口径：
+> **✅ 一致**｜**⚠️ 已改（有意/等价，可接受）**｜**❗ 风险（会造成信号失真或不可比，建议修）**｜**❓ 存疑（文档未写明或两版实现并存，无法判定哪条被验证过）**
+
+### 11.1 一句话结论
+
+**不完全一致。** 主干（Qwen3.5 提示词 / 相对坐标工具 / 奖励公式与 judge prompt）与案例对齐；**四处实质偏离**：
+① 训练数据混入案例明确排除的 thinklite（10953 条）；② val 仅 256 条且混源，与案例 1118 条单源不可比；③ `tool_config_path` 默认仍指绝对坐标工具，与数据集工具名不匹配（只靠 `run_full_v1.sh` 覆盖兜住）；④ judge prompt 不截断导致 400 → 答题正确却记 0。
+另有训练参数成体系偏离（KL / offload / torch_compile / 16384 响应 / TP=2 / micro-batch=1 等），**意味着本 run 的曲线、耗时、精度都不能直接套用案例结论**。
+
+逐条判定合计：**✅ 38 项、⚠️ 30 项、❗ 17 项、❓ 3 项**（❗ 归并为 §11.3 的 12 条差异，其中 P0 2 条、P1 3 条）。
+
+### 11.2 逐章节对照
+
+#### §2.1 多模态智能体 RL 范式 / §2.2 DeepEyes
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| iMCoT：模型自出 bbox → 裁剪 → 回灌视觉编码器 → 继续推理 | 同一范式（`ToolAgentLoop` 多轮 + 图像回灌） | ✅ |
+| 用端到端 RL 优化 grounding 与调用时机，不拆子模块 | 同一实现，无额外子模块 | ✅ |
+
+无代码差异，属概念层。
+
+#### §2.3 数据读取（Qwen2.5-VL 路径）
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| system prompt 逐字固定（"You are a helpful assistant…"） | `deepeyes.py:42-46` 逐字一致 | ✅ |
+| user 取 `prompt[1]` | `deepeyes.py:60-68` 反向找最后一个 user（更鲁棒，输出等价） | ⚠️ |
+| `dummy_tensor` 保留 DataProto 非空 | `deepeyes.py:110` 一致 | ✅ |
+| 案例 §2.3 走 `processor.apply_chat_template` + `multi_modal_data`（Qwen2.5 路径） | 我们走 §2.4 的 `return_raw_chat` 路径（Qwen3.5 必须如此，`rl_dataset.py:386`） | ⚠️（按模型版本切换，正确） |
+
+#### §2.3 图像工具
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| `num_workers: 256` + `init_visual_execution_pool(PoolMode.ThreadMode)` | **无 `num_workers`**，改用 `asyncio.Semaphore(rate_limit=256)`（`tools/image_zoom_in_tool_rel.py:73-75`） | ⚠️ 行为近似但机制不同：裁剪/解码在 event loop 内同步执行，高并发下有阻塞风险 |
+| `rate_limit: 256` / `timeout: 60` / `type: native` | 一致（`configs/image_zoom_in_rel_tool_config.yaml:4-6`） | ✅ |
+| `MIN_DIMENSION = 28`、宽高比 >100 拒绝、0-1000 → 绝对坐标并 clamp、失败返回 `-0.05`、成功文案 `Zoomed in on the image to the region (relative: [...])` | 逐条一致（`image_zoom_in_tool_rel.py:66,94,104-118,231-275`；案例 462-805） | ✅ |
+| 工具类放 `verl/tools/` | 放 `recipe/deepeyes/tools/`（路径不同，无功能影响） | ⚠️ |
+| 图像解码用 `verl.utils.fetch_image` | 自写 `_load_image`（支持 PIL/bytes/base64/URL/路径，`image_zoom_in_tool_rel.py:280-304`） | ⚠️ 覆盖更广，但未走案例同一条解码路径 |
+
+#### §2.3 奖励模型
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| 5 步：格式校验 → 答案抽取 → LLM judge → 工具检测 → 长度惩罚 | `deepeyes.py:221-302` 同结构 | ✅ |
+| judge system/user prompt **逐字** | 逐字一致（`deepeyes.py:324-353` vs 案例 300-345） | ✅ |
+| `final = 0.8*acc + 0.2*format + 1.2*tool` | 一致（`deepeyes.py:290`） | ✅ |
+| 奖励模型用 **Qwen3.5-27B** 平衡精度与时延 | 用 **Qwen3-30B-A3B**（`judge` 服务，142 机 `serve_judge*.sh:21` 显式 `--max-model-len 8192`） | ❗ 判分器换了；案例的"精度/时延平衡"结论不再成立，且 8192 上限直接导致 E-10 |
+| 只提 `openai_api_base` + `model_name` | 额外加 `temperature=0.1` + 随机 `seed` + `chat_template_kwargs.enable_thinking=False`，并对 400/422 自动去掉该 kwarg 重试（`deepeyes.py:356-377`） | ⚠️ 增强，但引入了非确定性（seed 随机）|
+| 未提超时/重试 | 3 次重试、60s、失败记 0（`deepeyes.py:368-377`） | ⚠️ |
+
+#### §2.4 数据读取与预处理
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| `data.return_raw_chat=True`，`apply_chat_template` 交给 AgentLoop | 一致（yaml + `run_full_v1.sh`） | ✅ |
+| prompt 内 `image_zoom_in_tool` → `image_zoom_in_rel_tool` 改写 | 一致（`deepeyes.py:69-78`） | ✅ |
+| `tools_kwargs = {"image_zoom_in_rel_tool": {"create_kwargs": {"image": images[0]}}}` | 一致（`deepeyes.py:99-102`） | ✅ |
+| `interaction_kwargs` 从 `extra_info` 取 | 固定 `{}`（`deepeyes.py:106`；数据里没有该键，等价） | ⚠️ |
+| `agent_name = "tool_agent"` | 一致（`deepeyes.py:34-35,108`） | ✅ |
+| 案例未剥 `<think>...</think>` 指令 | `CustomRLHFDatasetQwen35` 额外剥掉（`deepeyes.py:114-131`），理由是 Qwen3.5 模板已在 generation prompt 注入 `<think>`（`models/Qwen3.5-9B/chat_template.jinja:152`） | ❓ 我方新增、案例未验证；方向合理（避免双 `<think>`），但会改变 user prompt 字面 |
+| — | 额外 `row_dict.pop(image_key/video/audio)` + `_strip_raw_image_payloads`（`deepeyes.py:92-94`） | ⚠️ 等价优化 |
+
+#### §2.4 输出格式（Qwen3.5 工具调用）
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| Qwen3.5 原生是属性式 XML `<function=...><parameter=...>`（也兼容 XML+JSON） | `format=qwen3_coder` → `Qwen3XMLToolParser` **只认属性式 XML**（`tool_parser.py:189-330`） | ❗ 若模型退回 JSON 式 `<tool_call>{"name":...}`，parser 解析不到 → 该轮工具调用被丢弃（当前 run 0 次 malformed，说明模型稳定走 XML，但不能保证） |
+| — | parser 用 `ast.literal_eval` 并加 Ellipsis 兜底（同事补丁，`tool_parser.py:291-305`） | ✅ 增强 |
+| 案例 §3.3 启动脚本**未显式设 `format`**（默认 `hermes`），且 base yaml 的 `custom_chat_template` 注入的是 **JSON 格式说明** | 我们的 Qwen3.5 yaml 去掉 `custom_chat_template`，改用模型原生模板 + `qwen3_coder` | ❓ 两条自洽路径不等价；案例验证的到底是哪条，文档无法确定 |
+
+#### §2.4 坐标格式（相对坐标工具）
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| 继承 `BaseTool`，`image_zoom_in_rel_tool` | 一致（`image_zoom_in_tool_rel.py:57`） | ✅ |
+| 0-1000 → 绝对像素、clamp、最小 28、宽高比 >100 拒绝、失败 `-0.05` | 逐条一致 | ✅ |
+| ThreadMode 执行池 | asyncio 信号量（见 §2.3 图像工具） | ⚠️ |
+
+#### §2.4 奖励模型（成功标记门控）
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| 必须加 `"Zoomed in on the image to the region (relative:" in solution_str`，否则会出现"调了工具但参数错"的 reward hacking | 一致：`TOOL_SUCCESS_MARKER` 门控，且要求 `acc_reward > 0.5`（`deepeyes.py:41,286-287`） | ✅ |
+| 案例未做 `<think>` 计数校验 | 额外 `solution_str.count("<think>") > count("</think>")` → format error（`deepeyes.py:233`） | ⚠️ 合理增强（模板已注入 `<think>`，正常样本计数 0>1 为 False） |
+| 长度 ≥1000 字符 → 惩罚 | 一致，但我们是"acc 直接置 0 + 记 format error"（`deepeyes.py:271-273`），案例只写"惩罚项" | ⚠️ 惩罚更重 |
+| 答案抽取：`predict_no_think`（最后一段 `</think>` 之后）再正则 `<answer>` | 一致 + 三级兜底（tool_response / 去标签 / 全文） | ✅ |
+
+#### §3.1 训练分析（tool RL / 奖励设计）
+
+| 案例结论 | 当前实现 | 判定 |
+| --- | --- | --- |
+| 只要调工具就给奖励 → 调用次数先飙升后崩塌（不可用） | 我们没这么做 | ✅ |
+| 完全不给工具奖励 → 训练易崩 | 我们保留 1.2 权重 | ✅ |
+| 只有"答对 + 工具成功"才给 | 一致 | ✅ |
+
+#### §3.2 数据准备
+
+| 案例要点 | 当前实现 | 判定 |
+| --- | --- | --- |
+| 只用 `data_0.1.2_visual_toolbox_v2`（2w+ 条） | 用 `prepare_data.py` 默认 `DEFAULT_FILES = [visual_toolbox_v2, **data_thinklite_reasoning_acc**]`（`scripts/prepare_data.py:35`），train 实为 **33137 条 = vstar 22184 + thinklite_eureka 10953** | ❗ 案例明确排除 thinklite（理由：分辨率低，裁出来的图不足 1 个 patch） |
+| 排除 Chart（多子图 + 高分辨率易 OOM） | 一致，`CHART_FILE` 默认不加（`prepare_data.py:36,69`） | ✅ |
+| `test_ratio = 0.05` → val **1118 条** | `--val-size` 默认 **256**，且是从拼接数据前 256 行切（`prepare_data.py:52,214`），实为 **vstar 178 + thinklite 78** | ❗ 与案例 val 不可比 |
+| 案例无图像修复步骤 | 我们加 `repair_split`（小图上采样到 32 倍数、极端长宽比 padding），`prepare_data.py:200` | ⚠️ 规避 Qwen 图像 patch 对齐问题，方向合理，但改变了原始像素 |
+
+> 数据事实（本机 parquet 实测）：thinklite 行 `extra_info.answer` 为空、`ability=math`、`env_name=""`、user prompt **不含**工具指令（`grep '<think>'` 33137/33137 命中，但 `image_zoom_in_tool` 只在 22184 条 vstar 里出现）。也就是说这 1/3 样本既没有"用工具"的指令，也没有对应能力标签。
+
+#### §3.3 智能体配置
+
+| 案例 | 当前 | 判定 |
+| --- | --- | --- |
+| `rollout.name=vllm`、`mode=async` | 一致 | ✅ |
+| `multi_turn.enable=True`，assistant 5 / user 5 / parallel 1 | 一致 | ✅ |
+| `tool_config_path=recipe/deepeyes/configs/image_zoom_in_tool_config.yaml`（§3.3 脚本，**绝对坐标**）——但 §2.4 的数据集又把工具名改成 rel（**案例文档自身就自相矛盾**） | 我们继承了这个矛盾：yaml 与 `run_deepeyes_grpo_qwen3_5.sh` 默认仍指绝对坐标配置，只有 `run_full_v1.sh` 覆盖成 rel | ❗ **E-11**：绕开 run_full_v1 就静默失效；案例这条路径是否真跑通无法从文档确认 |
+| `format` 未显式设（默认 hermes） | `qwen3_coder` | ❓ 见 §2.4 输出格式 |
+
+#### §3.3 数据配置
+
+| 参数 | 案例 | 当前 | 判定 |
+| --- | --- | --- | --- |
+| `max_prompt_length` | 8192 | 8192 | ✅ |
+| `max_response_length` | **8192**（16384 被注释掉） | **16384** | ❗ 单步时长/显存/长答案 judge 超长（E-10）都放大 |
+| `max_model_len` | 16384 | 24576（8192+16384） | ❗ |
+| `max_num_batched_tokens` | 8192 | 32768 | ❗ |
+| `train_batch_size` | 128 | 64（9B 脚本，为 64G HBM 下调） | ⚠️ 有理由 |
+| `ppo_mini_batch_size` | 128 | 64 | ⚠️ |
+| `ppo_micro_batch_size_per_gpu` | 8 | **1** | ❗ 显存所迫，但梯度噪声/吞吐与案例完全不同 |
+| `return_raw_chat` / `truncation='error'` / `image_key=images` / `shuffle=False` | True / error / images / False | 一致（shuffle 默认 False，`rl_dataset.py:156`） | ✅ |
+| `filter_overlong_prompts` | False | False（改为离线 `*.filtered_8192.parquet` 预过滤） | ✅ 等价 |
+| `ignore_eos` | False（显式传） | 未设（默认 False） | ⚠️ 等价但未显式 |
+| `+engine_kwargs.vllm.disable_mm_preprocessor_cache=True` | 显式开 | **未设**（用 processor 缓存） | ❗ 多轮里同一图反复预处理的行为不同，可能踩到缓存语义 |
+
+#### §3.3 训练脚本参数（大表）
+
+| 参数 | 案例 | 当前（run_full_v1 → 9b 脚本） | 判定 |
+| --- | --- | --- | --- |
+| `adv_estimator` | grpo | grpo | ✅ |
+| `actor.optim.lr` | 1e-6 | 1e-6 | ✅ |
+| `use_kl_loss` / `kl_loss_coef` / `kl_loss_type` | **False** / 0.01（无效） / low_var_kl | **True / 0.001 / low_var_kl** | ❗ 主动偏离（防 E-1 崩塌），代价是与案例训练动力学不同 |
+| `algorithm.kl_ctrl.kl_coef` / `use_kl_in_reward` | 0.0 / False | 0.0 / False | ✅ |
+| `entropy_coeff` | 0 | 0 | ✅ |
+| `use_torch_compile` | **False** | **True** | ❗ 案例明确关掉；开了以后数值/编译问题排查面变大 |
+| `gradient_checkpointing` | True | True | ✅ |
+| actor `param_offload` / `optimizer_offload` | **False / False** | **True / True**（另 `offload_policy=True`、fsdp2） | ❗ 显存所迫，但吞吐/单步耗时与案例不可比（本机 29 min/step 是 64 batch 的实测，非案例数据） |
+| ref `param_offload` | True | True | ✅ |
+| `ref.fsdp_config.wrap_policy.min_num_params` | 0 | 未设 | ⚠️ |
+| `tensor_model_parallel_size` | 1 | 2 | ⚠️ 8 卡 9B 下的选择 |
+| `gpu_memory_utilization` | 0.6 | 0.55 | ⚠️ |
+| `enable_chunked_prefill` / `enforce_eager` / `free_cache_engine` | True / False / True | 一致 | ✅ |
+| `use_remove_padding` | True | **False** | ⚠️ Qwen3.5 GDN 在 NPU 上必须 False（配方 README 已说明），案例脚本是 Qwen2.5 的，按模型版本判我们正确 |
+| `rollout.n` | 8 | 8 | ✅ |
+| `n_gpus_per_node` / `nnodes` | 16 / 1 | 8 / 1 | ⚠️ 机器规模不同 |
+| `save_freq` | 5 | 5 | ✅ |
+| `test_freq` | 10 | **80** | ❗ 反馈周期差 8 倍 |
+| `total_epochs` | 2 | 1 | ⚠️ |
+| `val_before_train` | True | **False** | ⚠️ 少了一次冷启动基线 |
+| `critic_warmup` / `device` | 0 / npu | 一致 | ✅ |
+| `entropy_from_logits_with_chunking` | True（actor+ref） | True（actor）；ref 未设 | ⚠️ |
+| `ulysses_sequence_parallel_size` | 1 | 1 | ✅ |
+| `VLLM_USE_V1=1` / `USE_OPTIMIZED_MODEL=0` / `HCCL_CONNECT_TIMEOUT=5400` | 设置 | 未设 / 未设 / 1500 | ⚠️ 前两个在 vllm-ascend 0.27.1rc1 及配套 vllm 里 grep 无命中（V1 为唯一引擎、无该开关），设不设一样；HCCL 超时我们更短 |
+
+#### §3.4 训练结果
+
+| 案例 | 当前 | 判定 |
+| --- | --- | --- |
+| 一台 A3（910C，16 卡）、2w+ 数据、2 epoch、lr 1e-6；曲线图未给数值 | 一台 910B3（8 卡）、33137 条、1 epoch、lr 1e-6 | ❗ 卡型/卡数不同，曲线不可对标 |
+| 文字结论：**120 步奖励最优**；第二个 epoch 交互轮次与回复长度大增、奖励无明显提升 | 当前 run 31 步：`critic/score/mean` 区间 **0.76–1.49**，`ppo_kl` ~0.0015，健康；**val 未触发**（test_freq=80） | ⚠️ 我们把 `total_epochs` 降到 1，恰好避开案例说的"第二 epoch 空转"，但也失去了同一训练轨迹 |
+| Qwen3.5-4B：reward 0.99 → 1.57 | 未复现（本机只跑 9B） | — |
+| 案例未给单步耗时 | 本机历史实测 64 batch / 16384 响应 / 8 卡 ≈ 29 min/step（`ARCHTED_CASE.md`） | ⚠️ 本机数据，非案例 |
+
+#### §4.1 Agent 推理
+
+| 案例 | 当前（`scripts/eval_agent.py`） | 判定 |
+| --- | --- | --- |
+| `client.chat.completions`，`max_tokens=1000`，`temperature=0.7`，最多 5 轮 | 自研 async 循环，`max_tokens=2048`，`temperature=0.7`，5 轮 | ⚠️ 实现不同、预算不同 |
+| 用正则抽 `<tool_call>` JSON → `image_zoom_in_from_pil` | 自解析属性式 XML + 相对坐标 + 复用 `compute_score`/judge | ⚠️ 与训练链路对齐更好，但与案例脚本不是同一份代码 |
+| 案例输出逐样本 JSON（含 tool_calls / score 明细） | 输出 accuracy / tool_call_rate / format_rate / mean_score 汇总 + 明细 | ⚠️ |
+
+#### §4.2 评测口径
+
+| 案例 | 当前 | 判定 |
+| --- | --- | --- |
+| 两列：Model accuracy、Tool call rate；baseline 45.65% / 80%，AgenticRL 76.43% / 87.29% | 四指标（acc / tool_call_rate / format_rate / mean_score），数据 256 条混源 | ❗ 数字不可直接对照案例表 |
+| 评测集 = vstar test 1118 条 | = vstar 178 + thinklite 78 | ❗ |
+
+### 11.3 差异总清单（按风险）
+
+**P0 — 会让训练信号失真或静默失效，下一轮 run 前必修**
+
+1. **工具接线不一致**：yaml + 默认脚本指绝对坐标工具，数据集用 rel 名 → 绕开 `run_full_v1.sh` 时所有工具调用失败且不报错（E-11）。证据：`configs/deepeyes_multiturn_grpo_qwen3_5.yaml:36`、`run_deepeyes_grpo_qwen3_5.sh`、`deepeyes.py:34`、`tool_agent_loop.py:457,485`。
+2. **数据混入 thinklite_eureka 10953 条**：案例明确排除；无工具指令、`ability=math`、`extra_info.answer` 为空；val 也混了 78 条。证据：`scripts/prepare_data.py:35`、`data/deepeyes/*.filtered_8192.parquet` 统计。
+
+**P1 — 让"和案例比"这件事失去意义，或持续注入奖励噪声**
+
+3. **val 口径**：256 条混源 vs 案例 1118 条单源 → 不能用 0.70–0.78 判定成败。
+4. **judge 400（已观测 85 次）**：`acc` 静默记 0（E-10）。
+5. **训练参数成体系偏离**：`use_kl_loss`、`torch_compile`、offload 全开、16384 响应、TP=2、micro-batch=1、test_freq=80 → 曲线形态/耗时/稳定边界都与案例不同，不能拿案例阈值当验收线。
+
+**P2 — 一致性/健壮性问题，记录在案**
+
+6. 工具并发实现差异（asyncio 信号量 vs ThreadMode 池 / `num_workers`）。
+7. 缺 `disable_mm_preprocessor_cache=True`、`ignore_eos`（未显式）。
+8. reward 额外 `<think>` 计数校验 + ≥1000 字符直接 acc=0（比案例更严）。
+9. judge 模型 Qwen3-30B-A3B ≠ 案例 Qwen3.5-27B。
+10. `format=qwen3_coder` 只解析属性式 XML，模型若退回 JSON 式会丢工具调用。
+11. Qwen35 数据集剥掉 `<think>...</think>` 指令（案例未剥）。
+12. `eval_agent.py` 自研实现，与案例 §4.1 示例不同源。
+
+**存疑（文档/代码两版并存，无法判定）**
+
+13. 案例 §3.3 未设 `format`（默认 hermes）+ base yaml 的 `custom_chat_template` 是 JSON 风格；我们走原生模板 + `qwen3_coder`。两条路都自洽，但不是同一条。
+14. 案例 §2.3（processor 路径）与 §2.4（return_raw_chat 路径）自身就是两套代码，未标注哪套用于 Qwen3.5 正式 run。
+
+### 11.4 为什么"主干一致"仍然崩了（对 E-1 的复盘）
+
+案例文档里两条最关键的"血泪结论"，同事的 v1 实现都没落实：
+
+- **奖励门控**：只判断 `<tool_call>` 出现过就发工具奖励，等于奖励"装作会调工具"。案例 §2.4 明确要求用成功文案做门控。→ 已由 `TOOL_SUCCESS_MARKER` 修掉。
+- **数据单源**：案例只用 vstar 单数据集；混入 thinklite 后，1/3 样本永远拿不到工具奖励（无工具指令 + 能力标签 math），batch 内奖励分布被系统性拉偏，advantage 方差结构改变。
+- 叠加绝对坐标工具（Qwen3.5 吐 0-1000 相对坐标，被绝对工具当像素用 → bbox 塌缩到 <28px → 裁剪失败）+ judge 400 噪声 → 奖励信号持续劣化。E-1 的直接触发是 KL 失控（grad_norm 15 / kl 0.057），但上面三条是把模型推向"全错、工具全失败"的机制性诱因。
+
+现有防护（`use_kl_loss=0.001` + 零方差熔断 `VERL_ZERO_VAR_ABORT_STEPS=5`）只是**兜底**，不解决数据与 judge 噪声这两个根因。
+
+### 11.5 建议修复顺序（都不动当前 run，下一轮生效）
+
+1. **接线（10 分钟）**：yaml + `run_deepeyes_grpo_qwen3_5.sh` 默认改 `image_zoom_in_rel_tool_config.yaml`；跑 1 步冒烟，`grep -c "Unknown function\|Missing required 'image'"` 必须为 0。
+2. **数据（半天）**：`prepare_data.py` 加 `--vstar-only`，train = vstar 22184，val = 从 vstar 里切 ≥1118 条（`test_ratio=0.05`），与案例口径对齐；thinklite 若要保留，作为单独实验并单独统计。
+3. **judge（1 小时）**：`answer_text` 截断（保留尾部）+ 请求带 `max_tokens=16` + judge `max_model_len` 提到 16384 + 400 计数进 `reward_extra_info`（E-10）。
+4. **参数对齐（下一轮 run 前决策）**：先把 `max_response_length` 降到 8192、`test_freq` 降到 10，其余（KL、offload、torch_compile、TP）保持现状但在 Wiki 里明确"与案例不可比"，避免误读。
+5. **可选**：补 `disable_mm_preprocessor_cache=True`；把工具换成 ThreadMode 池（若 profiling 显示 tool 阶段是瓶颈）。
+
+### 11.6 复现本次审计的取证命令
+
+```bash
+# 数据构成
+/home/h00516332/deepeyes_run/conda/verl/bin/python - <<'PY'
+import pyarrow.parquet as pq, collections
+for f in ["train","val"]:
+    t=pq.read_table(f"/home/h00516332/deepeyes_run_v1/data/deepeyes/{f}.filtered_8192.parquet",columns=["data_source"])
+    print(f, t.num_rows, collections.Counter(t.column("data_source").to_pylist()))
+PY
+
+# 工具接线
+grep -n "tool_config_path" /home/h00516332/deepeyes_run_v1/verl/recipe/deepeyes/configs/deepeyes_multiturn_grpo_qwen3_5.yaml \
+  /home/h00516332/deepeyes_run_v1/verl/recipe/deepeyes/run_deepeyes_grpo_qwen3_5.sh /home/h00516332/deepeyes_run_v1/run_full_v1.sh
+
+# judge 400
+grep -c "Chat completion request failed: 400" /home/h00516332/deepeyes_run_v1/logs/v1_full/nohup.log
+
+# 工具调用是否真的成功（0 = 正常）
+grep -c "Unknown function\|Missing required 'image'\|Skipping malformed" /home/h00516332/deepeyes_run_v1/logs/v1_full/nohup.log
+```
+

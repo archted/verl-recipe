@@ -47,6 +47,28 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-11｜`tool_config_path` 与数据集 `TOOL_NAME` 不一致 → 工具调用全部静默失败（2026-11-11，案例一致性审计）
+
+- **现象**：直接执行 `bash recipe/deepeyes/run_deepeyes_grpo_qwen3_5_9b.sh` 时训练**不报错也能跑完**，但 `critic/score/mean` 长期停在 ~0.8 以下（=0.8×acc+0.2×format，工具奖励 1.2 永远拿不到），日志里会刷 `Unknown function '...'` 或 `Error executing tool '...': Missing required 'image' parameter in kwargs`。
+- **根因链**：
+  1. 数据集侧 `deepeyes.py` 已把工具名改成 `image_zoom_in_rel_tool`（案例 §2.4 要求，相对坐标），`tools_kwargs` 的键也跟着变成 rel 名；
+  2. 但 `configs/deepeyes_multiturn_grpo_qwen3_5.yaml` 与 `run_deepeyes_grpo_qwen3_5.sh` 默认仍指向 `image_zoom_in_tool_config.yaml`（绝对坐标工具，schema name = `image_zoom_in_tool`）；
+  3. `tool_agent_loop.py:457` 按 `tool_call.name` 在 `active_tools` 里查名字 → 查不到直接返回错误文本；即便名字匹配，`_call_tool` 用 `tools_kwargs.get(tool_name, {})` 取 create_kwargs，键不匹配就是空 dict → `ImageZoomInToolRelative.create()` 抛 `Missing required 'image' parameter`，异常被 `except` 吞掉只记 warning。
+- **为什么现在没炸**：正式 run 走 `run_full_v1.sh`，它显式覆盖了 `data.tool_config_path` 与 `actor_rollout_ref.rollout.multi_turn.tool_config_path` 都指向 rel 配置。**只有绕开 run_full_v1 才会踩**。
+- **修复**：把 recipe 默认值改对（yaml + `run_deepeyes_grpo_qwen3_5.sh` 默认 rel 配置），不要依赖启动脚本覆盖。判别命令：`grep -n "tool_config_path" <yaml> <run.sh>` 必须全部命中 `image_zoom_in_rel_tool_config.yaml`。
+- **自检**：跑 1 步后 `grep -c "Unknown function\|Missing required 'image'" <log>` 必须为 0。
+
+### E-10｜judge 返回 400（prompt 超 max_model_len）→ 答对样本被静默记 0 分（2026-11-11，案例一致性审计）
+
+- **现象**：训练日志出现 `Chat completion request failed: 400 Client Error: Bad Request for url: http://71.10.29.142:18901/v1/chat/completions`，本 run 截至 step 30 共 **85 次**（约 0.5% rollout）。对应样本 `acc_reward` 直接为 0，无任何显式告警统计。
+- **根因**：`deepeyes.py::_judge_accuracy` 把 `question + ground_truth + answer_text` 原样拼进 judge prompt，**不截断、不设 `max_tokens`**；judge 服务 `max_model_len=8192`。多轮 rollout 的 `answer_text` 可达数千 token（尤其 16384 响应长度下），拼上 system + few-shot 示例后超 8192 → vLLM 返回 400。`_post_judge` 的 3 次重试都是同一个超长 payload，必然全失败。
+- **影响**：不是崩溃，是**奖励噪声**——恰好答对的长答案被记 0，等价于给模型一个错误负样本。
+- **修复方向**（下次 run 生效，勿动当前 run）：
+  1. 截断 `answer_text`（如保留尾部 2000 字符，尾部才是最终 `<answer>`），或对 `ground_truth`/`question` 也加上限；
+  2. judge 请求显式带 `max_tokens: 16`（判定只需一个词），并把 judge `max_model_len` 提到 16384；
+  3. 加一个计数器：400 次数 / 总 judge 调用数，打到 `reward_extra_info` 里，便于早期发现。
+- **验证**：改完后 `grep -c "Chat completion request failed" <log>` 应为 0，且 `answer_length` 分布不再触顶。
+
 ### E-9｜opencode 自定义模型 token 上限字段：v2 用 limit，v1 风格 maxOutputTokens 被静默忽略（2026-11-11，容器内 opencode + judge）
 
 - **现象**：容器内 opencode 调本地 judge（vLLM，max_model_len=8192）报 `max_completion_tokens=32000 cannot be greater than max_model_len=8192`——配置里明明写了 `maxOutputTokens: 8192`。
