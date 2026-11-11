@@ -242,7 +242,7 @@ scp 同步）。
 | `deepeyes_run/data/deepeyes/` | `/workspace/data/deepeyes/` | 预过滤数据 train/val.filtered_8192.parquet（33137/256 条） |
 | `deepeyes_run/models/` | `/workspace/models/` | Qwen3.5-9B 原始模型 + **eval_qwen35_9b_step170（已导出的评测模型）** |
 | `deepeyes_run/eval_prep/` | `/workspace/eval_prep/` | **我的评测工程**（脚本/结果/报告） |
-| `atd/verl_project/ppt/`（宿主机，非容器） | — | **汇报资产目录**：`DeepEyes_agentic_RL_on_verl.pptx`（2 页：适配原理+流程图 / 工作量盘点）+ 生成脚本 `make_adapt_ppt.py`（python-pptx，改动内容后重跑即可再生成） |
+| `atd/verl_project/ppt/`（宿主机，非容器） | — | **汇报资产目录**：原版 `DeepEyes_agentic_RL_on_verl.pptx` + **领导汇报版 `DeepEyes_agentic_RL_on_verl_v2.pptx`**（2 页：教 AI 用“放大镜”的通俗原理 / 进展与下一步；训练进度 294/517=57%）+ 生成脚本 `make_adapt_ppt.py`、`make_adapt_ppt_v2.py`（python-pptx，改内容后重跑再生成） |
 | `deepeyes_run/conda/` | `/workspace/conda/` | conda env（`/workspace/conda/verl/bin/python`，Python 3.12） |
 
 ### 2.3 git 仓库（都是我的 fork）
