@@ -61,7 +61,7 @@
 | ckpt 合并 | ✅ | `verl.model_merger merge` → `/workspace/models/eval_smoke_v1_142/`（exit=134 glibc abort 无害） |
 | 推理评测 | ✅ | eval 服务 TP=2（卡 4/5，端口 18900）+ eval_agent --limit 8：**acc 100%**、tool_call_rate 100%、工具成功率 100%、format 零错误（与 138 侧 acc 100% 同量级） |
 
-**142 当前形态**：judge TP=2 跑在 deepeyes-v1 卡 6/7（138 训练打分已验证 3+ 个打分周期正常）；卡 0-5 空闲可训练/评测。**遗留动作：恢复 judge TP=8**（`TP=8 ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash /workspace/scripts/serve_judge_142.sh`），必须在 138 打分刚完成后的 ~40min 安全窗内操作（看 watchdog 最新 score 时间戳）。
+**142 当前形态（终态）**：judge **TP=8** 跑在 deepeyes-v1 全 8 卡（09:16 恢复，138 打分窗安全切换，`/v1/models` 200 + 质量探针 CORRECT + 零报错，卡 0-3 驱动残留未复发）。后续如需在 142 训练/评测，用 `TP=2 ASCEND_RT_VISIBLE_DEVICES=6,7` 共存形态（见 §5.3），切换务必避开 138 打分窗。
 
 **142 侧坑位**：① 卡 0-3 有 ~3.4G 驱动级残留 HBM（进程退出后不释放），起大服务若报 `Alloc Stream resource failed: Too many streams`，换干净卡（见 TROUBLESHOOTING E-6）；② batch 64 必须被 NDEVICES_PER_NODE 整除（6 卡不行、4/8 行）；③ `docker exec -d` 长命令偶发静默失败，改 `nohup ... &` 写法。
 
