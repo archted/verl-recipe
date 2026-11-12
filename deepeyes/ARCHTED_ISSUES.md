@@ -81,20 +81,21 @@
 
 | 本地文档 | 对应问题 | 截图 | 状态 |
 | --- | --- | --- | --- |
-| `DTS-001_E1-I9_GRPO零方差奖励致训练静默死亡.docx` | E-1 / I-9（合并一单） | 嵌入 4 图：1_score/3_grad_norm/4_kl + 日志零方差恒值摘录图（step 183-185 逐字提取，grep 计数 112） | ✅ 可提交 |
-| `DTS-002_I1_judge评分prompt超长400致奖励污染.docx` | I-1（**2026-11-12 已更新为二次定因版：调用顺序缺陷 + 0 分判定提前 + 4xx 不重试；原截断建议已删除**） | 嵌入 7 图：400 日志统计与原文（90 次）、vLLM reason 实测记录、修复前后代码（git 9c56e7f~1 vs 9c56e7f）、失败日志增强、judge 脚本 MAX_MODEL_LEN=32768、4 用例验收 | ✅ 可提交 |
-| `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2（**2026-11-12 升级为已解决：commit 894fef4 成功标记门控 + tool_used/tool_called 分离，容器内 3 用例验收通过**） | 嵌入 3 图：修复前代码（894fef4~1）、修复后代码（894fef4）、容器内验收实测（失败调用 tool_used=0） | ✅ 可提交 |
-| `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 嵌入 1 图：文档 vs 142 实测对照 | ✅ 可提交 |
-| `DTS-005_E2-I10_NPU驱动按命名空间独占设备新容器8020无指引.docx` | E-2 / I-10 | 嵌入 1 图：npu-smi -8020 与 dmesg uda_occupy（现场记录转录，图内已标注非实拍） | ✅ 可提交 |
-| `DTS-006_E6-I11_NPU进程退出后驱动级资源残留脏卡TooManyStreams.docx` | E-6 / I-11 | 嵌入 1 图：Too many streams 真实日志 + npu-smi 无主内存现场记录 + 换卡对照 | ✅ 可提交 |
-| `DTS-007_E3-I12_宿主机hosts缺localhost条目容器内Ray初始化失败.docx` | E-3 / I-12 | 嵌入 2 图：/etc/hosts 实拍（2026-11-12，全文无 127.0.0.1 localhost）+ Ray ConnectionError 真实日志 | ✅ 可提交 |
-| `DTS-008_E7-I13_docker_exec-d长命令偶发静默失败无诊断.docx` | E-7 / I-13 | 嵌入 1 图：exec -d 静默失败 vs 落盘脚本模式（现场记录转录，图内已标注非实拍） | ✅ 可提交 |
+| `DTS-001_E1-I9_GRPO零方差奖励致训练静默死亡.docx` | E-1 / I-9（合并一单） | 嵌入 4 图：1_score/3_grad_norm/4_kl 指标图 + 日志零方差恒值 grep 实拍（step:100 健康对照 vs step:184 恒 -0.2，计数 112） | ✅ 可提交 |
+| `DTS-002_I1_judge评分prompt超长400致奖励污染.docx` | I-1（**2026-11-12 已更新为二次定因版：调用顺序缺陷 + 0 分判定提前 + 4xx 不重试；原截断建议已删除**） | 嵌入 7 图（全部终端命令实拍，图内首行即复现命令）：400 日志统计与原文（90 次）、vLLM reason 文档原文、修复前代码（git 9c56e7f~1）、diff 判定前移、diff 日志增强、judge 脚本 MAX_MODEL_LEN=32768、容器验收 | ✅ 可提交 |
+| `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2（**2026-11-12 升级为已解决：commit 894fef4 成功标记门控 + tool_used/tool_called 分离，容器内 3 用例验收通过**） | 嵌入 3 图（终端命令实拍）：修复前代码（git 894fef4~1）、commit 894fef4 diff、容器内验收实测（失败调用 tool_used=0） | ✅ 可提交 |
+| `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 嵌入 1 图：RUNBOOK judge 行 grep + 训练日志 judge 端点提取实拍 | ✅ 可提交 |
+| `DTS-005_E2-I10_NPU驱动按命名空间独占设备新容器8020无指引.docx` | E-2 / I-10 | 嵌入 1 图：NPU 占用现状实拍（训练容器运行中、八卡 AICore 100%）；-8020/dmesg 为现场记录 txt | ✅ 可提交 |
+| `DTS-006_E6-I11_NPU进程退出后驱动级资源残留脏卡TooManyStreams.docx` | E-6 / I-11 | 嵌入 1 图：Too many streams 日志 grep 实拍（含上下文块） | ✅ 可提交 |
+| `DTS-007_E3-I12_宿主机hosts缺localhost条目容器内Ray初始化失败.docx` | E-3 / I-12 | 嵌入 1 图：/etc/hosts 缺条目 + 生产容器 ExtraHosts 修复参数 + 容器内解析现状三连实拍（2026-11-12） | ✅ 可提交 |
+| `DTS-008_E7-I13_docker_exec-d长命令偶发静默失败无诊断.docx` | E-7 / I-13 | 无图（偶发现象无落盘；现场记录 txt 摘录见 evidence/） | ✅ 可提交 |
 
-> **证据图目录（2026-11-12 建立）**：`pr_issue/evidence/`（.gitignore 内）存有 17 张 PNG + 17 个同名 .txt。
-> PNG 为终端风渲染图，内容**逐字来自真实日志/代码/实测输出**（git show、日志 grep、容器内运行记录），
-> 已按单嵌入 docx；"现场记录"类（当时终端输出未落盘）在图内明确标注"非实拍"，不冒充实拍。
-> 每张 PNG 同名 .txt 为同内容文本摘录（带来源文件路径），供人工重新截图。
-> 重新生成证据图：`python3 /home/h00516332/tmp_scripts/render_evidence.py`。
+> **证据图目录（2026-11-12 建立，同日升级为终端实拍式）**：`pr_issue/evidence/` 存有 16 张 PNG + 对应 .txt 摘录。
+> PNG 均为**真实终端实拍式**：在真实 tmux 终端里执行真实命令（bash 原始提示符 + 命令原始 ANSI 颜色，无任何加工），
+> `capture-pane` 抓取真实屏幕后 1:1 渲染——**图内第一行即复现命令**，可在同机直接重跑验证。
+> 例外：DTS-001 前三张为 matplotlib 指标图；DTS-005/DTS-008 的现场记录（当时无落盘）只提供 .txt 摘录并明确标注，不冒充实拍。
+> 每张 PNG 同名 .txt 为同内容文本摘录，供人工重新截图。
+> 重新生成：`python3 /home/h00516332/tmp_scripts/capture_render_evidence.py`（tmux 实拍 + 渲染一体）。
 
 > **md 镜像规则（2026-11-12 起）**：每份 docx 自动派生 `可提交_DTS-00x.md` 到同目录，方便快速复制粘贴；
 > docx 是提交载体、md 是复制载体，内容以 docx 为准。
@@ -189,7 +190,7 @@
 - [x] I-1 judge 400：二次定因 + 修复落地（commit 9c56e7f）+ DTS-002/PR md 已更新为二次定因版（2026-11-12）
 - [x] I-10~I-23 建档 + 22 份 upstream md 落盘（2026-11-12）
 - [x] I-2 修复落地（commit 894fef4）+ 容器内 3 用例验收（失败调用 tool_used=0）+ DTS-003 升级为已解决版含 3 图证据（2026-11-12）
-- [x] DTS-001~008 全部 8 单嵌入证据图（render_evidence.py 产出 17 PNG + 17 txt → pr_issue/evidence/；内容逐字来自真实日志/代码/实测，现场记录类图内标注非实拍）+ md 镜像同步（2026-11-12）
+- [x] DTS-001~008 证据图升级为终端实拍式（capture_render_evidence.py：tmux 真实终端执行真实命令 → capture-pane 抓屏 → 1:1 渲染，图内首行即复现命令；撤掉渲染风图与因果不成立的 smoke Ray 日志图，现场记录类仅留 txt）+ md 镜像同步（2026-11-12）
 - [x] I-2 实轨迹证据需求已关闭：容器内直接构造非法 bbox 轨迹调 compute_score 实测验收（3 用例），效果等同且更直接（2026-11-12）
 - [ ] I-4/I-5 在上游查重后决定是否提（I-4 md 已就绪，I-5 待补日志）
 - [ ] I-8 用 drafts/I8_pr_create_url.txt 预填链接手动创建 issue + PR（archted 已签 CLA）
