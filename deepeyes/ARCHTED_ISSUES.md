@@ -90,9 +90,14 @@
 | `DTS-007_E3-I12_宿主机hosts缺localhost条目容器内Ray初始化失败.docx` | E-3 / I-12 | 无（getent/报错日志可选） | ✅ 可提交 |
 | `DTS-008_E7-I13_docker_exec-d长命令偶发静默失败无诊断.docx` | E-7 / I-13 | 无 | ✅ 可提交 |
 
-> **md 镜像规则（2026-11-12 起）**：每份 docx 自动派生 `可提交_DTS-00x.md`（python-docx 抽段落，
-> 字段转 `##` 标题）到同目录，方便快速复制粘贴；docx 是提交载体、md 是复制载体，内容以 docx 为准。
-> 重新生成：`python3 /home/h00516332/tmp_scripts/gen_dts.py`（docx）+ pr_issue/ 目录内镜像脚本（md）。
+> **md 镜像规则（2026-11-12 起）**：每份 docx 自动派生 `可提交_DTS-00x.md` 到同目录，方便快速复制粘贴；
+> docx 是提交载体、md 是复制载体，内容以 docx 为准。
+> 重新生成：`python3 /home/h00516332/tmp_scripts/gen_dts.py`（docx）→
+> `python3 /home/h00516332/tmp_scripts/gen_dts_md_mirror.py`（md 镜像，含处理状态）。
+>
+> **字段模板（2026-11-12 更新）**：基础 6 字段【问题现象】【操作步骤】【预期结果】【实际结果】【问题根因】【修复建议】；
+> **处理状态为"已解决"的单追加 3 字段【解决思路】【验收环境】【验收结果】**（当前：DTS-002/004/005/006/007/008；
+> DTS-001 框架熔断未实现、DTS-003 修法待落地，暂为待修复状态，验收后补段）。每张单的处理状态同步记录在 md 镜像文件头。
 
 > **2026-11-12 重生成（修中文乱码）**：4 份 docx 打开时中文乱码，根因是 `gen_dts.py` 只设了
 > Calibri（python-docx 的 `font.name` 只写 `w:ascii/w:hAnsi`），theme 的东亚字体（`<a:ea>`）又是

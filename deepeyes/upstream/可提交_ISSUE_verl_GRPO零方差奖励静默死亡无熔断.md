@@ -28,7 +28,7 @@ Evidence from the real run (`full_outer_138_v3.log`):
 2. Emit a warning the first time reward variance is 0 for a single step (cheap check, catches hacking/collapse early).
 3. Bonus: when `bypass_mode=True`, `actor/entropy` is no longer produced (separate issue), which removes the other early-warning signal exactly when it matters most.
 
-We have already implemented and validated the step-1 breaker locally (env var `VERL_ZERO_VAR_ABORT_STEPS`, verified it triggers on a synthetic zero-variance batch and stays silent on healthy steps) and are happy to send a PR.
+We are happy to contribute a PR implementing the breaker (proposed design: env var `VERL_ZERO_VAR_ABORT_STEPS=N`; N consecutive steps with all-zero advantages → explicit ERROR log + abort + auto-rollback to the last checkpoint), pending maintainer feedback on the preferred UX (hard abort vs. warn-only with a metric).
 
 ### Impact
 Any long agentic-RL run can hit this; without detection the failure costs are measured in days of idle cluster time.
