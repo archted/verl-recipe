@@ -49,7 +49,7 @@
 | ID | 类别 | 描述 | 证据 | 状态 | 建议渠道 |
 | --- | --- | --- | --- | --- | --- |
 | **I-1** | 代码缺陷+改进 | **judge 400 → 奖励污染（2026-11-11 二次定因：调用顺序缺陷，非上下文容量）**：`compute_score` 第 277 行先调 `_judge_accuracy`、第 280 行才做 `len(answer_text)≥1000 → acc=0` 判定——顺序反了。400 全部来自"缺 `<answer>` 标签"的格式错误 rollout（回退分支把整条 rollout 尾部可达 16384 token 当 answer 发 judge，超 8192 必 400），而这类样本奖励本就定型为 0，judge 结论从不影响奖励 → 每次 400 都是纯无效调用（3 次重试 + 万级 token prefill）。实测 87 次/2048 rollout ≈ 4%，与格式错误率一致。**原"按 token 预算截断 answer_text/GT"方案已推翻**：用 judge 自家 tokenizer 实测合法输入最坏 1760 token（预算 8176 的 4.6 倍余量），合法流量碰不到上限；截断 GT（数据集最长 1884 字符）反而会把 CORRECT 判成 INCORRECT 造假阴性。顺带：4xx 确定性失败仍重试 3 次（sleep 1s+2s）；失败日志只有状态码不含 vLLM 响应体（首次误判的直接原因） | judge 400 计数 89（T-#12 全记录）+ tokenizer 逐集实测 + KV cache 2,049,536 token（8192 仅用 0.4%）+ deepeyes.py:277-280 顺序确认 | **修复已落地**：本地 commit 9c56e7f（0 分判定提前到 judge 调用前 + 日志带 body/prompt_chars，4 个单测过，奖励数值逐位不变）→ judge max_model_len 32768 脚本已备不重启 → **可提 PR**（md 已落盘：`upstream/可提交_PR_verl-recipe_judge调用顺序修复与失败日志增强.md`） | verl-recipe PR + DTS-002（已更新为二次定因版） |
-| **I-2** | 代码缺陷（回归） | **tool_reward 计入失败的工具调用（丢了防 reward-hacking 检查）**：`compute_score` 的 `has_tool_usage` 只查 `<tool_call>`/`<tool_response>` 标签存在（deepeyes.py:261-265）。bbox 非法时工具执行失败，但错误响应同样渲染为 `<tool_response>` → 仍得满分工具奖励。案例团队（同是 Qwen3.5）为此专门加过 `"Zoomed in on the image to the region (relative:" in solution_str` 成功标记检查（案例文档 §2.4 明确记录 reward hacking 现象），同事版本丢失该防线 | 代码 grep 确认无 "Zoomed in" 检查 + 案例文档 §2.4 记录 | 已验证 → **可提 PR**（修法：tool_used 要求含成功标记文本；补充：失败调用占比可作诊断指标）。提交前补一条实轨迹证据（outputs/ 里找 error 工具响应渲染样例） | verl-recipe PR（关联 #166/#167）+ DTS |
+| **I-2** | 代码缺陷（回归） | **tool_reward 计入失败的工具调用（丢了防 reward-hacking 检查）**：`compute_score` 的 `has_tool_usage` 只查 `<tool_call>`/`<tool_response>` 标签存在（deepeyes.py:261-265）。bbox 非法时工具执行失败，但错误响应同样渲染为 `<tool_response>` → 仍得满分工具奖励。案例团队（同是 Qwen3.5）为此专门加过 `"Zoomed in on the image to the region (relative:" in solution_str` 成功标记检查（案例文档 §2.4 明确记录 reward hacking 现象），同事版本丢失该防线 | 代码 grep 确认无 "Zoomed in" 检查 + 案例文档 §2.4 记录 | **已解决（2026-11-12）**：本地 commit 894fef4 落地 TOOL_SUCCESS_MARKER 门控 + tool_used（真实成功，奖励相关）/tool_called（尝试调用，诊断用）分离；容器内 3 用例验收通过（失败调用 tool_used=0、成功 tool_used=1、无工具全 0）→ **可提 PR**（md：`upstream/`）。实轨迹补充不再必要：验收用例直接构造非法 bbox 轨迹调 compute_score，实测通过 | verl-recipe PR（关联 #166/#167）+ DTS-003（已升级为已解决版，含 3 图证据） |
 | **I-3** | 内部文档错误 | 同事 TROUBLESHOOTING「环境」表未记录 judge 真实模型/部署形态（实际 Qwen3-30B-A3B-Instruct-2507、TP=8 占满 142 全部 8 卡、max_model_len 8192）；RUNBOOK §6.1 示例写 Qwen2.5-32B 会误导重建；「单步耗时分析」的 79-92 分钟是 142 语境，与 138 实测 29 分钟差异未标注 | 142 实测 + 本机 run_full_138.sh | 已验证 | DTS / 直接在 archted 仓 wiki 修正 |
 | **I-4** | 监控/文档 | `algorithm.rollout_correction.bypass_mode=True` 后 `actor/entropy` 指标不再产出（TROUBLESHOOTING 提速实验实测），监控面板/告警若依赖该指标会误判 | TROUBLESHOOTING「提速实验」+ 代码（calculate_entropy=False 时不计算） | 候选（需确认上游是否已知/有 issue） | verl issue（先查重）或文档 PR |
 | **I-5** | 推理引擎 | vllm-ascend AOT compile 缓存产物（含 inductor Triton wrapper）在 Ascend 无法加载，每次启动每 worker 重编 1-2 分钟并刷 WARNING（T-#18） | TROUBLESHOOTING #18 | 候选 → 需收集完整日志片段 | **vllm-ascend issue（蓝海，同事零提交）** |
@@ -81,14 +81,20 @@
 
 | 本地文档 | 对应问题 | 截图 | 状态 |
 | --- | --- | --- | --- |
-| `DTS-001_E1-I9_GRPO零方差奖励致训练静默死亡.docx` | E-1 / I-9（合并一单） | 嵌入 1_score/3_grad_norm/4_kl 三图 | ✅ 可提交 |
-| `DTS-002_I1_judge评分prompt超长400致奖励污染.docx` | I-1（**2026-11-12 已更新为二次定因版：调用顺序缺陷 + 0 分判定提前 + 4xx 不重试；原截断建议已删除**） | 无（代码/日志/tokenizer 实测证据） | ✅ 可提交 |
-| `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2 | 无（代码证据；提交前补一条实轨迹） | ✅ 可提交 |
-| `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 无（文档比对） | ✅ 可提交 |
-| `DTS-005_E2-I10_NPU驱动按命名空间独占设备新容器8020无指引.docx` | E-2 / I-10 | 无（dmesg 实锤） | ✅ 可提交 |
-| `DTS-006_E6-I11_NPU进程退出后驱动级资源残留脏卡TooManyStreams.docx` | E-6 / I-11 | 无（npu-smi 截图可选） | ✅ 可提交 |
-| `DTS-007_E3-I12_宿主机hosts缺localhost条目容器内Ray初始化失败.docx` | E-3 / I-12 | 无（getent/报错日志可选） | ✅ 可提交 |
-| `DTS-008_E7-I13_docker_exec-d长命令偶发静默失败无诊断.docx` | E-7 / I-13 | 无 | ✅ 可提交 |
+| `DTS-001_E1-I9_GRPO零方差奖励致训练静默死亡.docx` | E-1 / I-9（合并一单） | 嵌入 4 图：1_score/3_grad_norm/4_kl + 日志零方差恒值摘录图（step 183-185 逐字提取，grep 计数 112） | ✅ 可提交 |
+| `DTS-002_I1_judge评分prompt超长400致奖励污染.docx` | I-1（**2026-11-12 已更新为二次定因版：调用顺序缺陷 + 0 分判定提前 + 4xx 不重试；原截断建议已删除**） | 嵌入 7 图：400 日志统计与原文（90 次）、vLLM reason 实测记录、修复前后代码（git 9c56e7f~1 vs 9c56e7f）、失败日志增强、judge 脚本 MAX_MODEL_LEN=32768、4 用例验收 | ✅ 可提交 |
+| `DTS-003_I2_tool_reward计入失败工具调用可被hacking.docx` | I-2（**2026-11-12 升级为已解决：commit 894fef4 成功标记门控 + tool_used/tool_called 分离，容器内 3 用例验收通过**） | 嵌入 3 图：修复前代码（894fef4~1）、修复后代码（894fef4）、容器内验收实测（失败调用 tool_used=0） | ✅ 可提交 |
+| `DTS-004_I3_交接文档judge部署信息缺失误导重建.docx` | I-3 | 嵌入 1 图：文档 vs 142 实测对照 | ✅ 可提交 |
+| `DTS-005_E2-I10_NPU驱动按命名空间独占设备新容器8020无指引.docx` | E-2 / I-10 | 嵌入 1 图：npu-smi -8020 与 dmesg uda_occupy（现场记录转录，图内已标注非实拍） | ✅ 可提交 |
+| `DTS-006_E6-I11_NPU进程退出后驱动级资源残留脏卡TooManyStreams.docx` | E-6 / I-11 | 嵌入 1 图：Too many streams 真实日志 + npu-smi 无主内存现场记录 + 换卡对照 | ✅ 可提交 |
+| `DTS-007_E3-I12_宿主机hosts缺localhost条目容器内Ray初始化失败.docx` | E-3 / I-12 | 嵌入 2 图：/etc/hosts 实拍（2026-11-12，全文无 127.0.0.1 localhost）+ Ray ConnectionError 真实日志 | ✅ 可提交 |
+| `DTS-008_E7-I13_docker_exec-d长命令偶发静默失败无诊断.docx` | E-7 / I-13 | 嵌入 1 图：exec -d 静默失败 vs 落盘脚本模式（现场记录转录，图内已标注非实拍） | ✅ 可提交 |
+
+> **证据图目录（2026-11-12 建立）**：`pr_issue/evidence/`（.gitignore 内）存有 17 张 PNG + 17 个同名 .txt。
+> PNG 为终端风渲染图，内容**逐字来自真实日志/代码/实测输出**（git show、日志 grep、容器内运行记录），
+> 已按单嵌入 docx；"现场记录"类（当时终端输出未落盘）在图内明确标注"非实拍"，不冒充实拍。
+> 每张 PNG 同名 .txt 为同内容文本摘录（带来源文件路径），供人工重新截图。
+> 重新生成证据图：`python3 /home/h00516332/tmp_scripts/render_evidence.py`。
 
 > **md 镜像规则（2026-11-12 起）**：每份 docx 自动派生 `可提交_DTS-00x.md` 到同目录，方便快速复制粘贴；
 > docx 是提交载体、md 是复制载体，内容以 docx 为准。
@@ -96,8 +102,9 @@
 > `python3 /home/h00516332/tmp_scripts/gen_dts_md_mirror.py`（md 镜像，含处理状态）。
 >
 > **字段模板（2026-11-12 更新）**：基础 6 字段【问题现象】【操作步骤】【预期结果】【实际结果】【问题根因】【修复建议】；
-> **处理状态为"已解决"的单追加 3 字段【解决思路】【验收环境】【验收结果】**（当前：DTS-002/004/005/006/007/008；
-> DTS-001 框架熔断未实现、DTS-003 修法待落地，暂为待修复状态，验收后补段）。每张单的处理状态同步记录在 md 镜像文件头。
+> **处理状态为"已解决"的单追加 3 字段【解决思路】【验收环境】【验收结果】**（当前：DTS-002/003/004/005/006/007/008；
+> DTS-001 框架熔断未实现，暂为待修复状态，验收后补段）。每张单的处理状态同步记录在 md 镜像文件头。
+> DTS-003 已于 2026-11-12 升级为已解决（commit 894fef4 落地 + 容器内 3 用例验收）。
 
 > **2026-11-12 重生成（修中文乱码）**：4 份 docx 打开时中文乱码，根因是 `gen_dts.py` 只设了
 > Calibri（python-docx 的 `font.name` 只写 `w:ascii/w:hAnsi`），theme 的东亚字体（`<a:ea>`）又是
@@ -181,7 +188,9 @@
 - [ ] 盯 #166/#167（Qwen3.5 NPU 支持）review 意见并响应
 - [x] I-1 judge 400：二次定因 + 修复落地（commit 9c56e7f）+ DTS-002/PR md 已更新为二次定因版（2026-11-12）
 - [x] I-10~I-23 建档 + 22 份 upstream md 落盘（2026-11-12）
-- [ ] I-2 从 outputs 抽一条"工具执行失败仍渲染 <tool_response>"的真实轨迹作证据，然后提 issue + PR
+- [x] I-2 修复落地（commit 894fef4）+ 容器内 3 用例验收（失败调用 tool_used=0）+ DTS-003 升级为已解决版含 3 图证据（2026-11-12）
+- [x] DTS-001~008 全部 8 单嵌入证据图（render_evidence.py 产出 17 PNG + 17 txt → pr_issue/evidence/；内容逐字来自真实日志/代码/实测，现场记录类图内标注非实拍）+ md 镜像同步（2026-11-12）
+- [x] I-2 实轨迹证据需求已关闭：容器内直接构造非法 bbox 轨迹调 compute_score 实测验收（3 用例），效果等同且更直接（2026-11-12）
 - [ ] I-4/I-5 在上游查重后决定是否提（I-4 md 已就绪，I-5 待补日志）
 - [ ] I-8 用 drafts/I8_pr_create_url.txt 预填链接手动创建 issue + PR（archted 已签 CLA）
 - [ ] I-20 等 micro 1→8 SMOKE 数据回填后提 issue
