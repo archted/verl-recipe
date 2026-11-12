@@ -279,6 +279,19 @@ docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
 
 ## 3. 训练现状与日常监控
 
+### 3.0 版本管理（2026-11-12 建立，每次大改动前必跑快照）
+
+- **版本锚点 = 镜像 + runtime git tag**，三者已建档：
+  - V1.0-base：镜像 `deepeyes-train-infer:v1`（ID `3a91b482054b`，容器初建状态）
+  - V2.0：镜像 `deepeyes-train-infer:v2`（ID `43929e2f635e`，v1+opencode 运维工具，仅内部用）
+  - V1.1：`deepeyes_run_v1` git 仓 tag `v1.1-current`（verl NPU 补丁 + 全部脚本，已建本地 git）
+- **快照**：大改动前跑 `bash scripts/snapshot_version.sh <版本名> [说明]` →
+  自动 git commit+tag + tar 到 `/home/h00516332/deepeyes_versions/<名>/`（含 manifest：
+  镜像 ID/wiki hash/ckpt 备份/容器状态）。已有快照：`v1.1-offload1-rollback`
+- **正式交付包**：`/home/h00516332/deepeyes_release/v1.1-official/`
+  （镜像 tar 22G + runtime tar + README 部署指南 + manifest，训练/推理验证证据在内）
+- 运行时仓是本地 git（无远端）；Wiki 在 archted/verl-recipe（yuki/ 为根）已有远端
+
 ### 3.1 当前 run（v1_full，我发起 + 监控）
 
 - 启动脚本 `deepeyes_run_v1/scripts/run_full_v1.sh`（容器 `/workspace/scripts/` 是 bind mount
@@ -287,8 +300,9 @@ docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
   /workspace/scripts/run_full_v1.sh > /workspace/logs/v1_full/<log>.log 2>&1 & disown'`
   ——**必须 nohup+disown 脱离会话**（前台 docker exec 会被会话结束杀掉，E-13）
 - 参数：9B、train_batch 64、rollout.n=8、max_response 16384、GEN_TP=2、vllm gpu_mem 0.55、
-  8 卡 910B3、**PPO_MICRO_PER_GPU=1 + OFFLOAD=0**（11-12 冒烟选定，见 TROUBLESHOOTING E-12；
-  micro>1 会因 LM-head logits 线性爆内存 OOM，offload=0 是 -14% update_actor 的实测收益）
+  8 卡 910B3、**PPO_MICRO_PER_GPU=1 + OFFLOAD=1（2026-11-12 用户决策回退）**：offload=0 虽
+  实测 -17% update_actor，但显存峰值 57.6GB 余 6.4GB 过险，且步时收益无质变，安全优先；
+  offload=0 配置留档 E-12，如需启用 `OFFLOAD=0 bash run_full_v1.sh`
 - 进度（2026-11-12 重启）：**从 ckpt 65 续训（resume_mode=auto）**，总 517 步；旧 run 走到
   step 65（07:06 停训落盘，停步边界零损失）。**step 67 稳态实测**：update_actor=938.9s
   （旧 1131s，**-17%**）、step=1409.8s（**26.9→23.5 min，-12.7%**）、ppo_kl=0.0020、

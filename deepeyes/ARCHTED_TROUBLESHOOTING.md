@@ -86,6 +86,9 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
   真瓶颈是 GDN 走 `torch_chunk_gated_delta_rule`（transformers 纯 PyTorch 回退，无 NPU
   融合 kernel）。这是 kernel 级问题，配置调不动，留作后续专项（候选：torch.compile、
   专用 fused kernel 移植）。
+- **用户决策（2026-11-12）**：⚠️ 全量实测显示 offload=0 峰值 reserved 57.1-57.6GB（余仅
+  6.4GB），且省时 ~1 天/8.4 天无质变——**判定风险收益不匹配，正式版回退 OFFLOAD=1**。
+  offload=0 配置保留在脚本开关里留档，如需启用 `OFFLOAD=0 bash run_full_v1.sh`。
 - **最终落地**：`run_full_v1.sh` 增加 `OFFLOAD` 开关（默认 1，需显式 `OFFLOAD=0` 启动；
   关 FSDP2 param/optimizer/offload_policy，actor+ref）+ `PPO_MICRO_PER_GPU` 开关（默认 1）。
   **全量实测（step 66/67，2026-11-12）**：update_actor 1037.8→**938.9s**（旧 1131s，稳态
