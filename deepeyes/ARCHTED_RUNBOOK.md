@@ -542,6 +542,10 @@ docker exec -it deepeyes bash          # 138；142 同理（ssh 过去再 exec�
 - [x] **P0**：修 `tool_config_path` 默认接线（yaml + `run_deepeyes_grpo_qwen3_5.sh` 指向 rel 配置），见 §11.4 / TROUBLESHOOTING E-11 —— ✅ 2026-11-11 已改（下次启动生效）
 - [ ] **P0**：val 换成纯 vstar 子集（≥1000 条），train 增加 vstar-only 开关，见 §11.4 —— 🟡 开关已加（`--vstar-only`），数据待下一轮重新生成
 - [x] **P1**：judge 400，见 TROUBLESHOOTING E-10 —— ✅ 2026-11-11 已改（0 分判定提前到 judge 调用之前 + 失败日志带 response body；截断方案已推翻删除；judge `max_model_len` 32768 待下次重启生效）
+- [ ] **v2.1/MM**：用户在 ModelScope 网页建仓 `HiArcher/qwen35_deepeyes_v21_images` 后运行
+  `bash /home/h00516332/mm_oe_pull/upload_v21_modelscope.sh`（脚本已就绪，LFS 已装）
+- [ ] **v2.1/MM**：L1/L2 上板验证（需空闲 NPU：torch.npu.is_available() + vLLM serve 冒烟 + 训练 SMOKE 1 步）
+- [x] **v2.1/MM**：v2.1 镜像（OE+py3.11）+ MM 转换 + 双 tar 交付包 —— ✅ 2026-11-12 完成，见 §12
 
 ---
 
@@ -832,3 +836,54 @@ grep -c "Unknown function\|Missing required 'image'\|Skipping malformed" /home/h
 - 不重生成数据集（当前 run 进行中，换数据本轮不生效；要换时按 §11.5 第 2 条命令跑）。
 - 不在训练期间重启 judge（虽然 32768 已进脚本）：对现数据零收益，只会白赚 3–4 分钟 judge 停机，而那段时间的 judge 调用会全部记 0。
 - 不动训练参数（KL / offload / torch_compile / TP / micro-batch / test_freq），这些只影响"与案例可比性"，不影响正确性，留待下一轮 run 前决策。
+
+---
+
+## 12. v2.1 镜像与 ModelMate 转换（2026-11-12 完成闭环）
+
+> 详细过程：`/home/h00516332/atd/verl_project/modelmate镜像/v2.1移植过程记录.md`
+> 交付包：`/home/h00516332/deepeyes_release/v2.1/`（README + manifest + 双 tar.gz）
+
+### 12.1 一句话总结
+
+v2.1 = v1.1 同版本计算栈重基于 openEuler 24.03 + py3.11（MM 平台硬约束：OS 仅 OE、
+python 仅 3.9–3.11），经 MM 官方 build.sh 转 `-mm` 镜像（未改平台脚本），双 tar.gz
+gzip 校验 PASS，ModelScope 上传待用户建仓。
+
+### 12.2 关键产物
+
+| 项 | 值 |
+|---|---|
+| deepeyes-train-infer:v2.1 | 498325887f8d，32GB，tar.gz 13.3GB (91e09b37301ccf20) |
+| deepeyes-train-infer-mm:v2.1 | 5af9bddac495，45.4GB，tar.gz 18.5GB (03583731b8f01cdc) |
+| conda env | /workspace/conda/verl（py3.11.18，v1 路径约定，业务脚本零改动） |
+| git 锚点 | deepeyes_run_v1 mm_build @ e23945d |
+| 上传脚本 | mm_oe_pull/upload_v21_modelscope.sh（建仓后一键） |
+
+### 12.3 必须记住的经验（踩坑付费）
+
+1. **conda python DT_RPATH 劫持**：conda 二进制的 DT_RPATH 被整棵动态链接树继承
+   （glibc 语义），会让系统库（libcurl→libldap）解析到 conda 的 libcrypto。
+   OE libldap 硬依赖 EVP_md2@OPENSSL_3.0.0，conda openssl 禁用 MD2（降级也没用）→
+   import 崩。修复：`patchelf --set-rpath $ORIGIN/../lib python3.11`（patchelf 写
+   RUNPATH，不继承）。
+2. **openssl ABI 混装堆损坏**：系统 libssl 3.0.12 撞 resident conda libcrypto 3.5.9
+   （soname 相同被复用）→ "corrupted size vs. prev_size"。修复：mooncake 目录放
+   私有 libcurl/ldap/lber/sasl2/libssl_oe/libcrypto_oe（真实 OE 库副本 + soname
+   重命名 _oe 配对），mooncake .so 的 DT_RPATH($ORIGIN) 让同名优先。
+   **拒绝空壳 stub**：void 函数缺返回值语义 → curl 调用垃圾返回值 → 堆损坏。
+3. **torch+mooncake 退出 abort 是良性的**：import 成功后进程退出阶段
+   "corrupted size vs. prev_size"——v1 生产镜像完全相同（85+ 步训练健康）。
+   判故障前先 `grep -c MOONCAKE_OK` 确认 import 打印。
+4. **triton-ascend wheel 不是独立模块**：它把 Ascend 定制 triton 本体装进 `triton/`
+   包。`import triton_ascend` 在任何环境 ModuleNotFoundError；正确验证
+   `import triton` → 3.2.0。
+5. **MM build.sh 自动化**：交互项 stdin 喂 `printf '源镜像:tag\n1002\n\n\n'`；
+   push 到 registry.fusionstage.local 失败（无 cluster.conf）= 官方预期；
+   naie 用户由 `useradd --create-home` 创建 → 往 `/etc/skel/.config/opencode/`
+   COPY 配置即可让 naie 开箱即用。
+6. **py3.11 pip 安装纪律**：vllm-ascend editable 用 `--no-deps --no-build-isolation +
+   COMPILE_CUSTOM_KERNELS=0 + source set_env.sh`；req 清单 --no-deps 全量装（v1
+   freeze 内部约束冲突，新版 resolver 拒装）；pypi.org 勿作 extra-index（拖慢 torch）。
+7. **bash/docker 陷阱**：throwaway 容器（--rm）不保留 /tmp 与改动，多步实验必须
+   单容器完成；docker run 内嵌套 docker 命令不可用。
