@@ -290,12 +290,11 @@ docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
   8 卡 910B3、**PPO_MICRO_PER_GPU=1 + OFFLOAD=0**（11-12 冒烟选定，见 TROUBLESHOOTING E-12；
   micro>1 会因 LM-head logits 线性爆内存 OOM，offload=0 是 -14% update_actor 的实测收益）
 - 进度（2026-11-12 重启）：**从 ckpt 65 续训（resume_mode=auto）**，总 517 步；旧 run 走到
-  step 65（07:06 停训落盘，停步边界零损失）。**step 66 实测**：resume 成功、ppo_kl=0.0019、
-  score/mean=1.389（旧平台位衔接正常）、update_actor=1037.8s（旧 1131s，**-8.3%**）、
-  gen=349.5s、ref=191.8s、首步 step=1607s（含引擎冷启动，稳态看 67+）
-- ⚠️ **显存注意**：offload=0 后全量 run 峰值 reserved=57.1GB（余 ~7GB），比冒烟的 43.6GB 高
-  （全量样本更长）。micro=2 冒烟在 57.6GB 通过、micro=4 在 ~50GB OOM，当前处于两者之间；
-  无 OOM 但要盯 OOM 告警，一旦 OOM 从最近 ckpt 续训（损失 ≤5 步）
+  step 65（07:06 停训落盘，停步边界零损失）。**step 67 稳态实测**：update_actor=938.9s
+  （旧 1131s，**-17%**）、step=1409.8s（**26.9→23.5 min，-12.7%**）、ppo_kl=0.0020、
+  score=1.536（超旧平台位）；剩 452 步预计 ~7.4 天
+- ⚠️ **显存注意**：offload=0 后全量 run 峰值 reserved=57.1~57.6GB（余 ~6.4GB），比冒烟的
+  43.6GB 高（全量样本更长）。连续步无 OOM 即可用；一旦 OOM 从最近 ckpt 续训（损失 ≤5 步）
 - reward：旧 run score 0.95→1.45 后平台（更新中）；response_length 2815→975（缩短=学会了精炼）
 - ppo_kl 健康区间 0.001-0.002；>0.01 是 E-1 前兆（watchdog 会告警）
 - **备份**：`/workspace/ckpts/backup/` 有 global_step_60/65 冻结硬链接备份（211G，原目录被

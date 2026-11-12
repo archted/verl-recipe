@@ -88,10 +88,11 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
   专用 fused kernel 移植）。
 - **最终落地**：`run_full_v1.sh` 增加 `OFFLOAD` 开关（默认 1，需显式 `OFFLOAD=0` 启动；
   关 FSDP2 param/optimizer/offload_policy，actor+ref）+ `PPO_MICRO_PER_GPU` 开关（默认 1）。
-  **全量实测（step 66，2026-11-12）**：update_actor 1037.8s（旧 1131s，**-8.3%**，低于冒烟
-  -14% 但真实）、ref=191.8s、ppo_kl=0.0019、score=1.389 衔接正常。**注意**：全量峰值
-  reserved=57.1GB（余 ~7GB），显著高于冒烟的 43.6GB——全量样本最长序列比冒烟 batch 更长；
-  后续步无 OOM 则该余量可用，OOM 也不丢进度（≤5 步，从最近 ckpt 续训）。
+  **全量实测（step 66/67，2026-11-12）**：update_actor 1037.8→**938.9s**（旧 1131s，稳态
+  **-17%**）、ref=171s、gen=290s、**步时 1409.8s（26.9→23.5 min，-12.7%）**、ppo_kl=0.0020、
+  score=1.536（超旧平台位 1.45，衔接正常）。剩余 452 步预计 ~7.4 天（原 ~8.4 天，省 ~1 天）。
+  **注意**：全量峰值 reserved=57.1~57.6GB（余 ~6.4GB），显著高于冒烟的 43.6GB——全量样本
+  最长序列比冒烟 batch 更长；连续两步无 OOM 可用，OOM 也不丢进度（≤5 步，从最近 ckpt 续训）。
 - **附带坑**：SMOKE 复用 `ckpts/v1_smoke` 时 resume=auto 会直接续旧 ckpt 秒过（不训练、
   量不到数据）；冒烟前先 `mv` 走旧 smoke ckpt 目录。
 
