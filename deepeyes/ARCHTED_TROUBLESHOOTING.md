@@ -47,6 +47,54 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 
 ## B. 我遇到的问题日志（按时间倒序追加）
 
+### E-13｜重启训练的三个连环坑（2026-11-12，deepeyes-v1 停训→重启）
+
+按踩到的时间顺序，三个坑互相叠加，单独看每个都不明显：
+
+1. **`+ray_kwargs.ray_init.address=auto` 在清过 Ray 之后必炸**。`address=auto` 的语义是
+   "连接已存在的 Ray 实例"。之前正式 run 一直在跑、机器上有活着的 Ray，所以能起；一旦
+   pkill 清掉全部 ray 进程再启动，Ray 找不到实例直接 ConnectionError，训练起不来。
+   **修复**：`run_full_v1.sh` 已删掉该参数（不传 address 让 Ray 自拉新集群），并在脚本里注释了原因。
+2. **E-4 的修复之前只验证过、没落进脚本**。旧 run 是靠残留 Ray 环境里的
+   `VLLM_USE_AOT_COMPILE=0` 侥幸跑起来的（E-4 档案里"不可复现"的真实原因）。清干净 Ray
+   重启立刻复现 `aot_compile is not supported` 崩溃。**修复**：已落进
+   `run_full_v1.sh`（`+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_AOT_COMPILE='"0"'`，
+   hydra 陷阱：值必须写成引号内引号 `'\"0\"'` 传字符串，`=0` 会解析成 int 导致 ray TypeError）。
+3. **bash 多行命令续行中间不能插 `#` 注释**。`exec cmd arg1 arg2 \<换行> # 注释 \<换行> arg3`
+   的行连接会把注释文本接进命令并把 arg3 截掉（静默丢参数）。本次在改 run_full_v1.sh 时
+   犯了两次都被当场发现。**守则**：注释必须放在整条 exec 命令之前，不能夹在续行中间。
+
+### E-12｜放大 micro batch 的真正约束是 LM-head logits，不是激活数（2026-11-12，deepeyes-v1 冒烟矩阵）
+
+- **背景**：update_actor 占单步 75%（1131s），MFU ~1.6-3%，怀疑 micro_batch=1 太小。
+  案例（第七节）本身用 8，于是按"一次一变量"冒烟（SMOKE=1，batch 8，micro 变量化）。
+- **冒烟矩阵**（对照基线：11-10 冒烟 micro=1+offload1，update_actor 288.4s / MFU 2.65% / reserved 39.4GB）：
+
+| 配置 | update_actor | step | MFU | reserved | 判定 |
+|---|---|---|---|---|---|
+| micro=8 | OOM | - | - | 57.16GB 满 | ❌ |
+| micro=4 | OOM（单张量 21.5GB @49.9GB 已占） | - | - | 50.04GB | ❌ |
+| micro=2 | 258.4s（-10%） | 650.5s | 3.25% | **57.57GB（余 0.4GB）** | ❌ 收益配不上风险 |
+| **micro=1 + OFFLOAD=0** | **248.1s（-14%）** | **632.3s** | 3.28% | **43.64GB（余 20GB）** | ✅ **选定** |
+
+- **根因（定量）**：OOM 的分配是单个 **21.5GB logits 张量**。LM-head logits 大小 =
+  micro-batch token 数 × 词表 151936（fp32），随 micro **线性**增长；gradient checkpointing
+  只管激活，管不住 logits。所以 micro 翻倍 = logits 翻倍，micro=2 时最坏已贴到 64GB 上限。
+  这推翻了"案例用 8 所以 8 可行"的推断——案例的 micro 环境与本题（24576 token 长序列 +
+  151936 词表）不同，**引用外部配置前必须本地定量验证**。
+- **第二个结论（同样推翻预期）**：MFU 在所有配置下都 ~3%，offload 开关对 MFU 无影响——
+  真瓶颈是 GDN 走 `torch_chunk_gated_delta_rule`（transformers 纯 PyTorch 回退，无 NPU
+  融合 kernel）。这是 kernel 级问题，配置调不动，留作后续专项（候选：torch.compile、
+  专用 fused kernel 移植）。
+- **最终落地**：`run_full_v1.sh` 增加 `OFFLOAD` 开关（默认 1，需显式 `OFFLOAD=0` 启动；
+  关 FSDP2 param/optimizer/offload_policy，actor+ref）+ `PPO_MICRO_PER_GPU` 开关（默认 1）。
+  **全量实测（step 66，2026-11-12）**：update_actor 1037.8s（旧 1131s，**-8.3%**，低于冒烟
+  -14% 但真实）、ref=191.8s、ppo_kl=0.0019、score=1.389 衔接正常。**注意**：全量峰值
+  reserved=57.1GB（余 ~7GB），显著高于冒烟的 43.6GB——全量样本最长序列比冒烟 batch 更长；
+  后续步无 OOM 则该余量可用，OOM 也不丢进度（≤5 步，从最近 ckpt 续训）。
+- **附带坑**：SMOKE 复用 `ckpts/v1_smoke` 时 resume=auto 会直接续旧 ckpt 秒过（不训练、
+  量不到数据）；冒烟前先 `mv` 走旧 smoke ckpt 目录。
+
 ### E-11｜`tool_config_path` 与数据集 `TOOL_NAME` 不一致 → 工具调用全部静默失败（2026-11-11，案例一致性审计）
 
 - **现象**：直接执行 `bash recipe/deepeyes/run_deepeyes_grpo_qwen3_5_9b.sh` 时训练**不报错也能跑完**，但 `critic/score/mean` 长期停在 ~0.8 以下（=0.8×acc+0.2×format，工具奖励 1.2 永远拿不到），日志里会刷 `Unknown function '...'` 或 `Error executing tool '...': Missing required 'image' parameter in kwargs`。
@@ -137,6 +185,9 @@ rollout 40–50min ＋ 权重同步 25–30min（IPC 缺失）＋ actor 更新 5
 - **根因**：vLLM 0.27.1 的 `envs.py: use_aot_compile()` 在 torch≥2.10 时**默认开启** AOT 编译路径（`VLLM_USE_AOT_COMPILE` 默认 1），而 vllm-ascend nightly (0.27.1rc1) 的 ACL graph 捕获链路走不通该路径。旧容器当年能跑，靠的是 ray daemon 环境或缓存差异，不可复现也无谓深挖。
 - **修复**：在 `run_full_v1.sh` 传 `+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_AOT_COMPILE='"0"'`。**注意 hydra 陷阱：值必须写成 `'\"0\"'`（引号内引号传字符串）**，写 `=0` 会被解析成 int，ray 报 `TypeError: str(dict) expected`。
 - **验证**：改后 Capturing CUDA graphs (PIECEWISE) 35/35 通过，训练/推理均正常。
+- **状态更新（2026-11-12）**：✅ 修复已落进 `run_full_v1.sh`。当天停训清 Ray 重启时复现本
+  bug，确认旧 run 一直是靠残留 Ray 环境侥幸存活（详见 E-13）；现在脚本自带
+  `VLLM_USE_AOT_COMPILE='"0"'`，清 Ray 后可干净重启，已验证 Capturing CUDA graphs 35/35 通过。
 
 ### E-3｜容器内 localhost 无法解析 → Ray 连接失败（2026-11-10，deepeyes-v1）
 

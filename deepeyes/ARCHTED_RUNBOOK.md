@@ -279,35 +279,54 @@ docker run -d --name deepeyes --net=host --shm-size=64g --ulimit memlock=-1:-1 \
 
 ## 3. 训练现状与日常监控
 
-### 3.1 当前 run（同事发起，我接手监控）
+### 3.1 当前 run（v1_full，我发起 + 监控）
 
-- 脚本 `run_full_138.sh`：9B、`TRAIN_BATCH_SIZE=64`、`ROLLOUT_N=8`、`MAX_RESPONSE_LENGTH=16384`、
-  `GEN_TP=2`、`bypass_mode=True`、预过滤数据 + 绝对路径工具配置、`SAVE_FREQ=5`、
-  `max_actor_ckpt_to_keep=2`、日志 `logs/full_outer_138_v3.log`
-- 进度（2026-11-08）：**step 171/517（33%）**，单步 ~1755s（29 分钟），预计 **11-15 前后训完**
-- reward：`critic/score/mean ≈ 1.26–1.34`（持续上升中）
-- 验证集结果（每 80 步一次，打印在训练日志）：step 80 `val-core/vstar/acc=0.7753`；
-  step 160 `val-core/vstar/acc=0.7079`（vstar 子集回落，样本仅 89 条噪声大）；
-  thinklite_eureka 子集 step 80 acc=0.5897
-- 已知噪声：judge 400 报错 ~8 次/步（prompt 超长被拒，记 0 分，见 TROUBLESHOOTING D-1）
+- 启动脚本 `deepeyes_run_v1/scripts/run_full_v1.sh`（容器 `/workspace/scripts/` 是 bind mount
+  同一份；顶层 `deepeyes_run_v1/run_full_v1.sh` 只是同步副本，**改脚本要改 scripts/ 下的**）
+- 启动方式：`docker exec deepeyes-v1 bash -c 'cd /workspace && OFFLOAD=0 nohup bash
+  /workspace/scripts/run_full_v1.sh > /workspace/logs/v1_full/<log>.log 2>&1 & disown'`
+  ——**必须 nohup+disown 脱离会话**（前台 docker exec 会被会话结束杀掉，E-13）
+- 参数：9B、train_batch 64、rollout.n=8、max_response 16384、GEN_TP=2、vllm gpu_mem 0.55、
+  8 卡 910B3、**PPO_MICRO_PER_GPU=1 + OFFLOAD=0**（11-12 冒烟选定，见 TROUBLESHOOTING E-12；
+  micro>1 会因 LM-head logits 线性爆内存 OOM，offload=0 是 -14% update_actor 的实测收益）
+- 进度（2026-11-12 重启）：**从 ckpt 65 续训（resume_mode=auto）**，总 517 步；旧 run 走到
+  step 65（07:06 停训落盘，停步边界零损失）。**step 66 实测**：resume 成功、ppo_kl=0.0019、
+  score/mean=1.389（旧平台位衔接正常）、update_actor=1037.8s（旧 1131s，**-8.3%**）、
+  gen=349.5s、ref=191.8s、首步 step=1607s（含引擎冷启动，稳态看 67+）
+- ⚠️ **显存注意**：offload=0 后全量 run 峰值 reserved=57.1GB（余 ~7GB），比冒烟的 43.6GB 高
+  （全量样本更长）。micro=2 冒烟在 57.6GB 通过、micro=4 在 ~50GB OOM，当前处于两者之间；
+  无 OOM 但要盯 OOM 告警，一旦 OOM 从最近 ckpt 续训（损失 ≤5 步）
+- reward：旧 run score 0.95→1.45 后平台（更新中）；response_length 2815→975（缩短=学会了精炼）
+- ppo_kl 健康区间 0.001-0.002；>0.01 是 E-1 前兆（watchdog 会告警）
+- **备份**：`/workspace/ckpts/backup/` 有 global_step_60/65 冻结硬链接备份（211G，原目录被
+  滚动清理也不丢）；`max_actor_ckpt_to_keep=3`
+- **观察点**：step ~183（E-1 上次 collapse 的复发验证点）；step 80 会跑一次 val
+- 已知噪音：容器内退出日志 `exit=134 / corrupted size vs. prev_size` 是已知退出噪音
+  （成功任务也打），**不是失败信号**；judge 400 计数旧代码遗留，重启后归零
 
 ### 3.2 日常监控命令
 
 ```bash
-# 训练进度与 reward（138 宿主机直接看）
-tail -f /home/h00516332/deepeyes_run/logs/full_outer_138_v3.log
-grep -oE "step:[0-9]+ .* critic/score/mean:[0-9.]+" logs/full_outer_138_v3.log | tail -5
-grep "Training Progress" logs/full_outer_138_v3.log | tail -1
+# 训练进度与 reward（138 宿主机直接看；v1_full 的日志在 deepeyes_run_v1/logs/v1_full/）
+L=/home/h00516332/deepeyes_run_v1/logs/v1_full/nohup_resume_offload0.log   # 换成最新 nohup 日志
+grep -oE "step:[0-9]+ .* critic/score/mean:[0-9.]+" $L | tail -5
+grep -oE "timing_s/update_actor:[0-9.]+|timing_s/step:[0-9.]+|perf/mfu/actor:[0-9.]+|max_memory_reserved_gb:[0-9.]+" $L | tail -8
+grep "Training Progress" $L | tail -1
+
+# watchdog（自动心跳 + E-1 前兆告警：ppo_kl>0.01、score/min 恒 -0.2、日志 STALE）
+tail -5 /home/h00516332/deepeyes_run_v1/logs/watchdog.log
+cat /home/h00516332/deepeyes_run_v1/logs/watchdog_alert.log
+cat /home/h00516332/deepeyes_run_v1/logs/watchdog.pid   # 进程挂了就重跑 watchdog.sh
 
 # 卡健康 / 训练进程存活
+docker exec deepeyes-v1 bash -lc 'ps -eo pid,args | grep "[v]erl.trainer.main_ppo" | wc -l'
 npu-smi info
 
 # 142 judge 是否存活
 ssh h00516332@71.10.29.142 "ss -ltn | grep 18901 && curl -s http://127.0.0.1:18901/v1/models | head -c 200"
 
-# checkpoint 磁盘水位（每 5 步新增最多 106GB，只留 2 个）
-du -sh deepeyes_run/ckpts/full/global_step_*/actor 2>/dev/null
-df -h /home
+# checkpoint 磁盘水位（每 5 步新增最多 106GB，保留 3 个 + backup 211G）
+docker exec deepeyes-v1 bash -lc 'du -sh /workspace/ckpts/v1_full/global_step_* 2>/dev/null; df -h /home | tail -1'
 ```
 
 **红线**：训练期间（8 卡被 rayWorkerDict/VLLMWorker_TP 占满）不得在 138 上起任何 NPU 进程、
